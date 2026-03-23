@@ -1,0 +1,11 @@
+[package]
+name = "tab-cwd-rename"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zellij-tile = "0.44"
+
+[[bin]]
+name = "tab-cwd-rename"
+path = "src/main.rs"
