@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use zellij_tile::prelude::*;
+
+const CTX_TAB_ID: &str = "tab_id";
+const CTX_CWD: &str = "cwd";
 
 #[derive(Default)]
 struct State {
@@ -17,6 +21,10 @@ struct State {
     id_to_position: HashMap<usize, usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
     pane_to_tab: HashMap<u32, usize>,
+    /// Git toplevel path → repo basename (cache to avoid re-running git)
+    git_roots: HashMap<String, String>,
+    /// Paths known to NOT be in a git repo
+    not_git: HashSet<String>,
     /// $HOME path for ~ substitution
     home_dir: String,
 }
@@ -28,11 +36,13 @@ impl ZellijPlugin for State {
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            PermissionType::RunCommands,
         ]);
         subscribe(&[
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::CwdChanged,
+            EventType::RunCommandResult,
             EventType::PermissionRequestResult,
         ]);
         self.home_dir = std::env::var("HOME").unwrap_or_default();
@@ -65,6 +75,9 @@ impl State {
             Event::TabUpdate(tabs) => self.on_tab_update(tabs),
             Event::PaneUpdate(manifest) => self.on_pane_update(manifest),
             Event::CwdChanged(pane_id, cwd, _clients) => self.on_cwd_changed(pane_id, cwd),
+            Event::RunCommandResult(exit_code, stdout, _stderr, context) => {
+                self.on_run_command_result(exit_code, stdout, context);
+            }
             _ => {}
         }
     }
@@ -104,7 +117,6 @@ impl State {
     }
 
     fn on_pane_update(&mut self, manifest: PaneManifest) {
-        // Rebuild pane → tab mapping
         self.pane_to_tab.clear();
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
@@ -118,7 +130,7 @@ impl State {
         }
     }
 
-    fn on_cwd_changed(&mut self, pane_id: PaneId, cwd: std::path::PathBuf) {
+    fn on_cwd_changed(&mut self, pane_id: PaneId, cwd: PathBuf) {
         let PaneId::Terminal(terminal_id) = pane_id else {
             return;
         };
@@ -131,16 +143,89 @@ impl State {
             return;
         }
 
-        let Some(&tab_pos) = self.id_to_position.get(&tab_id) else {
-            return;
-        };
-
-        let cwd_str = cwd.to_string_lossy();
+        let cwd_str = cwd.to_string_lossy().to_string();
         if cwd_str.is_empty() {
             return;
         }
 
-        let new_name = self.derive_name(&cwd_str);
+        // Walk ancestors of cwd and probe git_roots cache (O(depth) hash lookups)
+        if let Some(repo_name) = self.find_git_root(&cwd_str) {
+            self.apply_name(tab_id, repo_name);
+            return;
+        }
+
+        if self.not_git.contains(&cwd_str) {
+            let name = self.derive_name(&cwd_str);
+            self.apply_name(tab_id, name);
+            return;
+        }
+
+        // Unknown: fire async git rev-parse
+        let mut context = BTreeMap::new();
+        context.insert(CTX_TAB_ID.to_string(), tab_id.to_string());
+        context.insert(CTX_CWD.to_string(), cwd_str);
+        run_command_with_env_variables_and_cwd(
+            &["git", "rev-parse", "--show-toplevel"],
+            BTreeMap::new(),
+            cwd,
+            context,
+        );
+    }
+
+    /// Walk path ancestors and check if any is a known git root. O(depth) hash lookups.
+    fn find_git_root(&self, cwd: &str) -> Option<String> {
+        let mut path = Path::new(cwd);
+        loop {
+            if let Some(repo_name) = self.git_roots.get(path.to_str()?) {
+                return Some(repo_name.clone());
+            }
+            path = path.parent()?;
+        }
+    }
+
+    fn on_run_command_result(
+        &mut self,
+        exit_code: Option<i32>,
+        stdout: Vec<u8>,
+        context: BTreeMap<String, String>,
+    ) {
+        let Some(tab_id_str) = context.get(CTX_TAB_ID) else {
+            return;
+        };
+        let Ok(tab_id) = tab_id_str.parse::<usize>() else {
+            return;
+        };
+        let Some(cwd) = context.get(CTX_CWD) else {
+            return;
+        };
+
+        if self.manually_renamed.contains(&tab_id) {
+            return;
+        }
+
+        let toplevel = (exit_code == Some(0))
+            .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let new_name = match toplevel {
+            Some(tl) => {
+                let repo_name = basename(&tl);
+                self.git_roots.insert(tl, repo_name.clone());
+                repo_name
+            }
+            None => {
+                self.not_git.insert(cwd.clone());
+                self.derive_name(cwd)
+            }
+        };
+
+        self.apply_name(tab_id, new_name);
+    }
+
+    fn apply_name(&mut self, tab_id: usize, new_name: String) {
+        let Some(&tab_pos) = self.id_to_position.get(&tab_id) else {
+            return;
+        };
 
         let already_set = self
             .applied_names
@@ -149,8 +234,7 @@ impl State {
 
         if !already_set {
             rename_tab(tab_pos as u32, &new_name);
-            self.applied_names.insert(tab_id, new_name.clone());
-            self.last_tab_names.insert(tab_id, new_name);
+            self.applied_names.insert(tab_id, new_name);
         }
     }
 
@@ -158,10 +242,14 @@ impl State {
         if !self.home_dir.is_empty() && cwd == self.home_dir {
             return "~".to_string();
         }
-
-        match cwd.rsplit('/').next() {
-            Some(basename) if !basename.is_empty() => basename.to_string(),
-            _ => "/".to_string(),
-        }
+        basename(cwd)
     }
+}
+
+fn basename(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("/")
+        .to_string()
 }
