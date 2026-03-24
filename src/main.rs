@@ -11,20 +11,23 @@ struct State {
     buffered_events: Vec<Event>,
     /// Stable tab_id → last name we applied (anti-flicker cache)
     applied_names: HashMap<usize, String>,
-    /// Stable tab_ids the user renamed manually — we never touch these
-    manually_renamed: HashSet<usize>,
-    /// Stable tab_id → last known tab name (to detect manual renames)
-    last_tab_names: HashMap<usize, String>,
     /// Mapping: tab_index → stable tab_id
     index_to_id: HashMap<usize, usize>,
-    /// Mapping: stable tab_id → tab position (for rename_tab API)
-    id_to_position: HashMap<usize, usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
     pane_to_tab: HashMap<u32, usize>,
     /// Git toplevel path → repo basename (cache to avoid re-running git)
     git_roots: HashMap<String, String>,
     /// Paths known to NOT be in a git repo
     not_git: HashSet<String>,
+    /// CwdChanged events for pane_ids not yet in pane_to_tab
+    pending_cwds: HashMap<u32, PathBuf>,
+    /// Last known CWD per tab_id
+    tab_cwds: HashMap<usize, PathBuf>,
+    /// Tab ID of the previously active tab (before the current one)
+    prev_active_tab_id: Option<usize>,
+    /// Tab ID of the currently active tab
+    active_tab_id: Option<usize>,
+
     /// $HOME path for ~ substitution
     home_dir: String,
 }
@@ -85,47 +88,63 @@ impl State {
     fn on_tab_update(&mut self, tabs: Vec<TabInfo>) {
         let alive_ids: HashSet<usize> = tabs.iter().map(|t| t.tab_id).collect();
 
-        // GC stale entries for deleted tabs
-        self.applied_names.retain(|id, _| alive_ids.contains(id));
-        self.manually_renamed.retain(|id| alive_ids.contains(id));
-        self.last_tab_names.retain(|id, _| alive_ids.contains(id));
-
-        // Rebuild index/position mappings
-        self.index_to_id.clear();
-        self.id_to_position.clear();
         for tab in &tabs {
-            self.index_to_id.insert(tab.position, tab.tab_id);
-            self.id_to_position.insert(tab.tab_id, tab.position);
+            if tab.active && self.active_tab_id != Some(tab.tab_id) {
+                self.prev_active_tab_id = self.active_tab_id;
+                self.active_tab_id = Some(tab.tab_id);
+            }
         }
 
-        // Detect manual renames
-        for tab in &tabs {
-            let id = tab.tab_id;
-            if let Some(prev_name) = self.last_tab_names.get(&id) {
-                if *prev_name != tab.name {
-                    let we_set_it = self
-                        .applied_names
-                        .get(&id)
-                        .is_some_and(|n| *n == tab.name);
-                    if !we_set_it {
-                        self.manually_renamed.insert(id);
-                    }
-                }
+        // GC stale entries for deleted tabs
+        self.applied_names.retain(|id, _| alive_ids.contains(id));
+        self.tab_cwds.retain(|id, _| alive_ids.contains(id));
+        if let Some(id) = self.prev_active_tab_id {
+            if !alive_ids.contains(&id) {
+                self.prev_active_tab_id = None;
             }
-            self.last_tab_names.insert(id, tab.name.clone());
+        }
+
+        self.index_to_id.clear();
+        for tab in &tabs {
+            self.index_to_id.insert(tab.position, tab.tab_id);
         }
     }
 
     fn on_pane_update(&mut self, manifest: PaneManifest) {
-        self.pane_to_tab.clear();
+        let old_pane_to_tab = std::mem::take(&mut self.pane_to_tab);
+        let mut new_panes: Vec<(u32, usize)> = Vec::new();
+
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
                 continue;
             };
             for pane in panes {
                 if !pane.is_plugin {
+                    if !old_pane_to_tab.contains_key(&pane.id) {
+                        new_panes.push((pane.id, tab_id));
+                    }
                     self.pane_to_tab.insert(pane.id, tab_id);
                 }
+            }
+        }
+
+        // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still unresolved)
+        let pending = std::mem::take(&mut self.pending_cwds);
+        for (terminal_id, cwd) in pending {
+            self.on_cwd_changed(PaneId::Terminal(terminal_id), cwd);
+        }
+
+        // For new panes in tabs without an applied name, use the previous tab's CWD
+        for (pane_id, tab_id) in new_panes {
+            if self.applied_names.contains_key(&tab_id) || self.tab_cwds.contains_key(&tab_id) {
+                continue;
+            }
+            let cwd = self
+                .prev_active_tab_id
+                .and_then(|id| self.tab_cwds.get(&id))
+                .cloned();
+            if let Some(cwd) = cwd {
+                self.on_cwd_changed(PaneId::Terminal(pane_id), cwd);
             }
         }
     }
@@ -136,19 +155,17 @@ impl State {
         };
 
         let Some(&tab_id) = self.pane_to_tab.get(&terminal_id) else {
+            self.pending_cwds.insert(terminal_id, cwd);
             return;
         };
 
-        if self.manually_renamed.contains(&tab_id) {
-            return;
-        }
+        self.tab_cwds.insert(tab_id, cwd.clone());
 
         let cwd_str = cwd.to_string_lossy().to_string();
         if cwd_str.is_empty() {
             return;
         }
 
-        // Walk ancestors of cwd and probe git_roots cache (O(depth) hash lookups)
         if let Some(repo_name) = self.find_git_root(&cwd_str) {
             self.apply_name(tab_id, repo_name);
             return;
@@ -160,7 +177,6 @@ impl State {
             return;
         }
 
-        // Unknown: fire async git rev-parse
         let mut context = BTreeMap::new();
         context.insert(CTX_TAB_ID.to_string(), tab_id.to_string());
         context.insert(CTX_CWD.to_string(), cwd_str);
@@ -199,10 +215,6 @@ impl State {
             return;
         };
 
-        if self.manually_renamed.contains(&tab_id) {
-            return;
-        }
-
         let toplevel = (exit_code == Some(0))
             .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
             .filter(|s| !s.is_empty());
@@ -223,17 +235,13 @@ impl State {
     }
 
     fn apply_name(&mut self, tab_id: usize, new_name: String) {
-        let Some(&tab_pos) = self.id_to_position.get(&tab_id) else {
-            return;
-        };
-
         let already_set = self
             .applied_names
             .get(&tab_id)
             .is_some_and(|n| *n == new_name);
 
         if !already_set {
-            rename_tab(tab_pos as u32, &new_name);
+            rename_tab_with_id(tab_id as u64, &new_name);
             self.applied_names.insert(tab_id, new_name);
         }
     }
