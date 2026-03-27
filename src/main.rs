@@ -9,6 +9,8 @@ const CTX_CWD: &str = "cwd";
 struct State {
     got_permissions: bool,
     buffered_events: Vec<Event>,
+    /// Whether to detect git repos for tab naming (default: true)
+    git_detection: bool,
     /// Stable tab_id → last name we applied (anti-flicker cache)
     applied_names: HashMap<usize, String>,
     /// Mapping: tab_index → stable tab_id
@@ -35,7 +37,11 @@ struct State {
 register_plugin!(State);
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _config: BTreeMap<String, String>) {
+    fn load(&mut self, config: BTreeMap<String, String>) {
+        self.git_detection = config
+            .get("git_detection")
+            .map(|v| v != "false")
+            .unwrap_or(true);
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -166,6 +172,12 @@ impl State {
             return;
         }
 
+        if !self.git_detection {
+            let name = self.derive_name(&cwd_str);
+            self.apply_name(tab_id, name);
+            return;
+        }
+
         if let Some(repo_name) = self.find_git_root(&cwd_str) {
             self.apply_name(tab_id, repo_name);
             return;
@@ -205,6 +217,9 @@ impl State {
         stdout: Vec<u8>,
         context: BTreeMap<String, String>,
     ) {
+        if !self.git_detection {
+            return;
+        }
         let Some(tab_id_str) = context.get(CTX_TAB_ID) else {
             return;
         };
