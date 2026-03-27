@@ -11,8 +11,12 @@ struct State {
     buffered_events: Vec<Event>,
     /// Whether to detect git repos for tab naming (default: true)
     git_detection: bool,
-    /// Stable tab_id → last name we applied (anti-flicker cache)
+    /// Format string for pane count suffix, e.g. " ({pane_count})"
+    pane_count_format: Option<String>,
+    /// Stable tab_id → last base name we computed (without pane count)
     applied_names: HashMap<usize, String>,
+    /// Current non-plugin pane count per tab
+    tab_pane_counts: HashMap<usize, usize>,
     /// Mapping: tab_index → stable tab_id
     index_to_id: HashMap<usize, usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
@@ -42,6 +46,7 @@ impl ZellijPlugin for State {
             .get("git_detection")
             .map(|v| v != "false")
             .unwrap_or(true);
+        self.pane_count_format = config.get("pane_count").cloned();
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -104,6 +109,7 @@ impl State {
         // GC stale entries for deleted tabs
         self.applied_names.retain(|id, _| alive_ids.contains(id));
         self.tab_cwds.retain(|id, _| alive_ids.contains(id));
+        self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
         if let Some(id) = self.prev_active_tab_id {
             if !alive_ids.contains(&id) {
                 self.prev_active_tab_id = None;
@@ -119,20 +125,38 @@ impl State {
     fn on_pane_update(&mut self, manifest: PaneManifest) {
         let old_pane_to_tab = std::mem::take(&mut self.pane_to_tab);
         let mut new_panes: Vec<(u32, usize)> = Vec::new();
+        let mut new_counts: HashMap<usize, usize> = HashMap::new();
 
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
                 continue;
             };
+            let mut count = 0usize;
             for pane in panes {
                 if !pane.is_plugin {
+                    count += 1;
                     if !old_pane_to_tab.contains_key(&pane.id) {
                         new_panes.push((pane.id, tab_id));
                     }
                     self.pane_to_tab.insert(pane.id, tab_id);
                 }
             }
+            new_counts.insert(tab_id, count);
         }
+
+        // Detect tabs whose pane count changed and re-apply their name
+        if self.pane_count_format.is_some() {
+            for (&tab_id, &new_count) in &new_counts {
+                let old_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(0);
+                if old_count != new_count {
+                    if let Some(base_name) = self.applied_names.get(&tab_id).cloned() {
+                        let full_name = self.format_tab_name(&base_name, new_count);
+                        rename_tab_with_id(tab_id as u64, &full_name);
+                    }
+                }
+            }
+        }
+        self.tab_pane_counts = new_counts;
 
         // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still unresolved)
         let pending = std::mem::take(&mut self.pending_cwds);
@@ -256,8 +280,20 @@ impl State {
             .is_some_and(|n| *n == new_name);
 
         if !already_set {
-            rename_tab_with_id(tab_id as u64, &new_name);
+            let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
+            let full_name = self.format_tab_name(&new_name, pane_count);
+            rename_tab_with_id(tab_id as u64, &full_name);
             self.applied_names.insert(tab_id, new_name);
+        }
+    }
+
+    fn format_tab_name(&self, base_name: &str, pane_count: usize) -> String {
+        match &self.pane_count_format {
+            Some(fmt) if pane_count > 1 => {
+                let suffix = fmt.replace("{pane_count}", &pane_count.to_string());
+                format!("{base_name}{suffix}")
+            }
+            _ => base_name.to_string(),
         }
     }
 
