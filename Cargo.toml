@@ -1,5 +1,5 @@
 [package]
-name = "tab-cwd-rename"
+name = "zellij-tab-namer"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,5 +7,5 @@ edition = "2021"
 zellij-tile = "0.44"
 
 [[bin]]
-name = "tab-cwd-rename"
+name = "zellij-tab-namer"
 path = "src/main.rs"
