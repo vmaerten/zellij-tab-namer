@@ -5,6 +5,11 @@ use zellij_tile::prelude::*;
 const CTX_TAB_ID: &str = "tab_id";
 const CTX_CWD: &str = "cwd";
 
+enum Decoration {
+    Prefix,
+    Suffix,
+}
+
 #[derive(Default)]
 struct State {
     got_permissions: bool,
@@ -33,6 +38,11 @@ struct State {
     prev_active_tab_id: Option<usize>,
     /// Tab ID of the currently active tab
     active_tab_id: Option<usize>,
+
+    /// Per-tab prefix set via pipe API (e.g. "🤖 ")
+    tab_prefixes: HashMap<usize, String>,
+    /// Per-tab suffix set via pipe API (e.g. " [building]")
+    tab_suffixes: HashMap<usize, String>,
 
     /// $HOME path for ~ substitution
     home_dir: String,
@@ -80,6 +90,30 @@ impl ZellijPlugin for State {
         false
     }
 
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+            unblock_cli_pipe_input(pipe_id);
+        }
+
+        match pipe_message.name.as_str() {
+            "set_prefix" => self.handle_set_decoration(&pipe_message.args, Decoration::Prefix),
+            "set_suffix" => self.handle_set_decoration(&pipe_message.args, Decoration::Suffix),
+            "clear_prefix" => self.handle_clear_decoration(&pipe_message.args, Decoration::Prefix),
+            "clear_suffix" => self.handle_clear_decoration(&pipe_message.args, Decoration::Suffix),
+            "clear_all" => {
+                if let Some(tab_id) = self.resolve_tab_id(&pipe_message.args) {
+                    let had_prefix = self.tab_prefixes.remove(&tab_id).is_some();
+                    let had_suffix = self.tab_suffixes.remove(&tab_id).is_some();
+                    if had_prefix || had_suffix {
+                        self.reapply_name(tab_id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn render(&mut self, _rows: usize, _cols: usize) {}
 }
 
@@ -110,6 +144,8 @@ impl State {
         self.applied_names.retain(|id, _| alive_ids.contains(id));
         self.tab_cwds.retain(|id, _| alive_ids.contains(id));
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
+        self.tab_prefixes.retain(|id, _| alive_ids.contains(id));
+        self.tab_suffixes.retain(|id, _| alive_ids.contains(id));
         if let Some(id) = self.prev_active_tab_id {
             if !alive_ids.contains(&id) {
                 self.prev_active_tab_id = None;
@@ -145,18 +181,15 @@ impl State {
         }
 
         // Detect tabs whose pane count changed and re-apply their name
+        let old_counts = std::mem::replace(&mut self.tab_pane_counts, new_counts);
         if self.pane_count_format.is_some() {
-            for (&tab_id, &new_count) in &new_counts {
-                let old_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(0);
+            for (&tab_id, &new_count) in &self.tab_pane_counts {
+                let old_count = old_counts.get(&tab_id).copied().unwrap_or(0);
                 if old_count != new_count {
-                    if let Some(base_name) = self.applied_names.get(&tab_id).cloned() {
-                        let full_name = self.format_tab_name(&base_name, new_count);
-                        rename_tab_with_id(tab_id as u64, &full_name);
-                    }
+                    self.reapply_name(tab_id);
                 }
             }
         }
-        self.tab_pane_counts = new_counts;
 
         // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still unresolved)
         let pending = std::mem::take(&mut self.pending_cwds);
@@ -280,20 +313,76 @@ impl State {
             .is_some_and(|n| *n == new_name);
 
         if !already_set {
-            let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
-            let full_name = self.format_tab_name(&new_name, pane_count);
+            let full_name = self.compose_full_name(tab_id, &new_name);
             rename_tab_with_id(tab_id as u64, &full_name);
             self.applied_names.insert(tab_id, new_name);
         }
     }
 
-    fn format_tab_name(&self, base_name: &str, pane_count: usize) -> String {
-        match &self.pane_count_format {
-            Some(fmt) if pane_count > 1 => {
-                let suffix = fmt.replace("{pane_count}", &pane_count.to_string());
-                format!("{base_name}{suffix}")
-            }
-            _ => base_name.to_string(),
+    fn reapply_name(&self, tab_id: usize) {
+        if let Some(base_name) = self.applied_names.get(&tab_id) {
+            let full_name = self.compose_full_name(tab_id, base_name);
+            rename_tab_with_id(tab_id as u64, &full_name);
+        }
+    }
+
+    fn compose_full_name(&self, tab_id: usize, base_name: &str) -> String {
+        let prefix = self
+            .tab_prefixes
+            .get(&tab_id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let suffix = self
+            .tab_suffixes
+            .get(&tab_id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
+        let pane_count_suffix = match &self.pane_count_format {
+            Some(fmt) if pane_count > 1 => fmt.replace("{pane_count}", &pane_count.to_string()),
+            _ => String::new(),
+        };
+        format!("{prefix}{base_name}{suffix}{pane_count_suffix}")
+    }
+
+    fn resolve_tab_id(&self, args: &BTreeMap<String, String>) -> Option<usize> {
+        match args.get("tab_id").map(|s| s.as_str()) {
+            Some("active") | None => self.active_tab_id,
+            Some(id_str) => id_str.parse::<usize>().ok(),
+        }
+    }
+
+    fn handle_set_decoration(&mut self, args: &BTreeMap<String, String>, decoration: Decoration) {
+        let Some(tab_id) = self.resolve_tab_id(args) else {
+            return;
+        };
+        let value = args.get("value").cloned().unwrap_or_default();
+        let map = match decoration {
+            Decoration::Prefix => &mut self.tab_prefixes,
+            Decoration::Suffix => &mut self.tab_suffixes,
+        };
+        let current = map.get(&tab_id).map(|s| s.as_str()).unwrap_or("");
+        if value == current {
+            return;
+        }
+        if value.is_empty() {
+            map.remove(&tab_id);
+        } else {
+            map.insert(tab_id, value);
+        }
+        self.reapply_name(tab_id);
+    }
+
+    fn handle_clear_decoration(&mut self, args: &BTreeMap<String, String>, decoration: Decoration) {
+        let Some(tab_id) = self.resolve_tab_id(args) else {
+            return;
+        };
+        let removed = match decoration {
+            Decoration::Prefix => self.tab_prefixes.remove(&tab_id),
+            Decoration::Suffix => self.tab_suffixes.remove(&tab_id),
+        };
+        if removed.is_some() {
+            self.reapply_name(tab_id);
         }
     }
 
