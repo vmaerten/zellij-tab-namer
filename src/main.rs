@@ -16,8 +16,12 @@ struct State {
     buffered_events: Vec<Event>,
     /// Whether to detect git repos for tab naming (default: true)
     git_detection: bool,
-    /// Format string for pane count suffix, e.g. " ({pane_count})"
-    pane_count_format: Option<String>,
+    /// Format template for tab name, e.g. "{process}: {name}"
+    format: String,
+    /// Fallback format when no process is detected, e.g. "{name}"
+    format_no_proc: String,
+    /// Shell names to exclude from process detection
+    shell_names: HashSet<String>,
     /// Stable tab_id → last base name we computed (without pane count)
     applied_names: HashMap<usize, String>,
     /// Current non-plugin pane count per tab
@@ -39,6 +43,8 @@ struct State {
     /// Tab ID of the currently active tab
     active_tab_id: Option<usize>,
 
+    /// Per-tab detected process name (from focused pane title)
+    tab_processes: HashMap<usize, String>,
     /// Per-tab prefix set via pipe API (e.g. "🤖 ")
     tab_prefixes: HashMap<usize, String>,
     /// Per-tab suffix set via pipe API (e.g. " [building]")
@@ -56,7 +62,18 @@ impl ZellijPlugin for State {
             .get("git_detection")
             .map(|v| v != "false")
             .unwrap_or(true);
-        self.pane_count_format = config.get("pane_count").cloned();
+        self.format = config
+            .get("format")
+            .cloned()
+            .unwrap_or_else(|| "{name}".to_string());
+        self.format_no_proc = config
+            .get("format_no_proc")
+            .cloned()
+            .unwrap_or_else(|| self.format.clone());
+        self.shell_names = config
+            .get("shell_names")
+            .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
+            .unwrap_or_else(default_shell_names);
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -144,6 +161,7 @@ impl State {
         self.applied_names.retain(|id, _| alive_ids.contains(id));
         self.tab_cwds.retain(|id, _| alive_ids.contains(id));
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
+        self.tab_processes.retain(|id, _| alive_ids.contains(id));
         self.tab_prefixes.retain(|id, _| alive_ids.contains(id));
         self.tab_suffixes.retain(|id, _| alive_ids.contains(id));
         if let Some(id) = self.prev_active_tab_id {
@@ -163,6 +181,11 @@ impl State {
         let mut new_panes: Vec<(u32, usize)> = Vec::new();
         let mut new_counts: HashMap<usize, usize> = HashMap::new();
 
+        let uses_process =
+            self.format.contains("{process}") || self.format_no_proc.contains("{process}");
+        let uses_pane_count =
+            self.format.contains("{pane_count}") || self.format_no_proc.contains("{pane_count}");
+
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
                 continue;
@@ -178,11 +201,29 @@ impl State {
                 }
             }
             new_counts.insert(tab_id, count);
+
+            // Detect process from focused pane title
+            if uses_process {
+                let process = panes
+                    .iter()
+                    .find(|p| !p.is_plugin && p.is_focused)
+                    .map(|p| p.title.as_str())
+                    .and_then(|t| extract_process_name(t, &self.shell_names));
+
+                let old = self.tab_processes.get(&tab_id).map(|s| s.as_str());
+                if old != process.as_deref() {
+                    match process {
+                        Some(p) => self.tab_processes.insert(tab_id, p),
+                        None => self.tab_processes.remove(&tab_id),
+                    };
+                    self.reapply_name(tab_id);
+                }
+            }
         }
 
         // Detect tabs whose pane count changed and re-apply their name
         let old_counts = std::mem::replace(&mut self.tab_pane_counts, new_counts);
-        if self.pane_count_format.is_some() {
+        if uses_pane_count {
             for (&tab_id, &new_count) in &self.tab_pane_counts {
                 let old_count = old_counts.get(&tab_id).copied().unwrap_or(0);
                 if old_count != new_count {
@@ -337,12 +378,21 @@ impl State {
             .get(&tab_id)
             .map(|s| s.as_str())
             .unwrap_or("");
-        let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
-        let pane_count_suffix = match &self.pane_count_format {
-            Some(fmt) if pane_count > 1 => fmt.replace("{pane_count}", &pane_count.to_string()),
-            _ => String::new(),
+
+        let process = self.tab_processes.get(&tab_id);
+        let template = match process {
+            Some(_) => &self.format,
+            None => &self.format_no_proc,
         };
-        format!("{prefix}{base_name}{suffix}{pane_count_suffix}")
+
+        let mut result = template.replace("{name}", base_name);
+        if let Some(proc) = process {
+            result = result.replace("{process}", proc);
+        }
+        let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
+        result = result.replace("{pane_count}", &pane_count.to_string());
+
+        format!("{prefix}{result}{suffix}")
     }
 
     fn resolve_tab_id(&self, args: &BTreeMap<String, String>) -> Option<usize> {
@@ -400,4 +450,23 @@ fn basename(path: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("/")
         .to_string()
+}
+
+fn extract_process_name(title: &str, shell_names: &HashSet<String>) -> Option<String> {
+    let command = title.split_whitespace().next()?;
+    let base = command.rsplit('/').next().unwrap_or(command);
+    if base.is_empty() || shell_names.contains(&base.to_lowercase()) {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+fn default_shell_names() -> HashSet<String> {
+    [
+        "bash", "zsh", "fish", "nu", "nushell", "sh", "dash", "ksh", "tcsh", "csh", "elvish",
+        "pwsh",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
