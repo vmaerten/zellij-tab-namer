@@ -22,6 +22,10 @@ struct State {
     format_no_proc: String,
     /// Shell names to exclude from process detection
     shell_names: HashSet<String>,
+    /// Whether the format templates use {process}
+    uses_process: bool,
+    /// Whether the format templates use {pane_count}
+    uses_pane_count: bool,
     /// Stable tab_id → last base name we computed (without pane count)
     applied_names: HashMap<usize, String>,
     /// Current non-plugin pane count per tab
@@ -74,6 +78,10 @@ impl ZellijPlugin for State {
             .get("shell_names")
             .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
             .unwrap_or_else(default_shell_names);
+        self.uses_process =
+            self.format.contains("{process}") || self.format_no_proc.contains("{process}");
+        self.uses_pane_count =
+            self.format.contains("{pane_count}") || self.format_no_proc.contains("{pane_count}");
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -181,10 +189,7 @@ impl State {
         let mut new_panes: Vec<(u32, usize)> = Vec::new();
         let mut new_counts: HashMap<usize, usize> = HashMap::new();
 
-        let uses_process =
-            self.format.contains("{process}") || self.format_no_proc.contains("{process}");
-        let uses_pane_count =
-            self.format.contains("{pane_count}") || self.format_no_proc.contains("{pane_count}");
+        let mut dirty_tabs: HashSet<usize> = HashSet::new();
 
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
@@ -202,8 +207,7 @@ impl State {
             }
             new_counts.insert(tab_id, count);
 
-            // Detect process from focused pane title
-            if uses_process {
+            if self.uses_process {
                 let process = panes
                     .iter()
                     .find(|p| !p.is_plugin && p.is_focused)
@@ -216,20 +220,24 @@ impl State {
                         Some(p) => self.tab_processes.insert(tab_id, p),
                         None => self.tab_processes.remove(&tab_id),
                     };
-                    self.reapply_name(tab_id);
+                    dirty_tabs.insert(tab_id);
                 }
             }
         }
 
         // Detect tabs whose pane count changed and re-apply their name
         let old_counts = std::mem::replace(&mut self.tab_pane_counts, new_counts);
-        if uses_pane_count {
+        if self.uses_pane_count {
             for (&tab_id, &new_count) in &self.tab_pane_counts {
                 let old_count = old_counts.get(&tab_id).copied().unwrap_or(0);
                 if old_count != new_count {
-                    self.reapply_name(tab_id);
+                    dirty_tabs.insert(tab_id);
                 }
             }
+        }
+
+        for tab_id in &dirty_tabs {
+            self.reapply_name(*tab_id);
         }
 
         // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still unresolved)
@@ -386,11 +394,11 @@ impl State {
         };
 
         let mut result = template.replace("{name}", base_name);
-        if let Some(proc) = process {
-            result = result.replace("{process}", proc);
+        result = result.replace("{process}", process.map(|s| s.as_str()).unwrap_or(""));
+        if self.uses_pane_count {
+            let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
+            result = result.replace("{pane_count}", &pane_count.to_string());
         }
-        let pane_count = self.tab_pane_counts.get(&tab_id).copied().unwrap_or(1);
-        result = result.replace("{pane_count}", &pane_count.to_string());
 
         format!("{prefix}{result}{suffix}")
     }
@@ -455,7 +463,7 @@ fn basename(path: &str) -> String {
 fn extract_process_name(title: &str, shell_names: &HashSet<String>) -> Option<String> {
     let command = title.split_whitespace().next()?;
     let base = command.rsplit('/').next().unwrap_or(command);
-    if base.is_empty() || shell_names.contains(&base.to_lowercase()) {
+    if base.is_empty() || shell_names.iter().any(|s| s.eq_ignore_ascii_case(base)) {
         return None;
     }
     Some(base.to_string())
