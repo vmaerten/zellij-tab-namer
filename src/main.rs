@@ -34,6 +34,8 @@ struct State {
     pending_cwds: HashMap<u32, PathBuf>,
     /// Last known CWD per tab_id
     tab_cwds: HashMap<usize, PathBuf>,
+    /// CWDs currently awaiting a git rev-parse result (dedup in-flight git queries)
+    pending_git: HashSet<String>,
     /// Tab ID of the previously active tab (before the current one)
     prev_active_tab_id: Option<usize>,
     /// Tab ID of the currently active tab
@@ -246,6 +248,11 @@ impl State {
             return;
         }
 
+        if self.pending_git.contains(&cwd_str) {
+            return;
+        }
+        self.pending_git.insert(cwd_str.clone());
+
         let mut context = BTreeMap::new();
         context.insert(CTX_TAB_ID.to_string(), tab_id.to_string());
         context.insert(CTX_CWD.to_string(), cwd_str);
@@ -286,6 +293,7 @@ impl State {
         let Some(cwd) = context.get(CTX_CWD) else {
             return;
         };
+        self.pending_git.remove(cwd);
 
         let toplevel = (exit_code == Some(0))
             .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
