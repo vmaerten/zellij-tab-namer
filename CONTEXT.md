@@ -34,10 +34,14 @@ _Avoid_: toplevel, repo root
 **Waiter**:
 A tab awaiting the git verdict for a cwd whose query is in flight. Every waiter on the same cwd is renamed when the verdict lands.
 
+**Discovery query**:
+The cwd lookup issued for a newly discovered pane whose tab has no base name yet — how tabs get named at session start, tab creation and restore, without waiting for a `cd`. The tab's focused pane speaks for it; failing that, its first terminal pane.
+_Avoid_: poll, probe
+
 ### Architecture
 
 **Effect**:
-One intended action of the plugin on zellij (rename a tab, launch a git query, unblock a pipe, request permissions, subscribe). The core's only output; the catalogue of the plugin's entire impact on the world.
+One intended action of the plugin on zellij (rename a tab, launch a git query, issue a discovery query, unblock a pipe, request permissions, subscribe). The core's only output; the catalogue of the plugin's entire impact on the world.
 _Avoid_: command, action, side effect
 
 **Core**:
