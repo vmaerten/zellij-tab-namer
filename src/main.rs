@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use zellij_tile::prelude::*;
 
-const CTX_TAB_ID: &str = "tab_id";
 const CTX_CWD: &str = "cwd";
 
 enum Decoration {
@@ -13,29 +12,37 @@ enum Decoration {
 #[derive(Default)]
 struct State {
     got_permissions: bool,
-    buffered_events: Vec<Event>,
+    /// Latest state snapshots seen before permissions were granted, replayed on
+    /// grant. TabUpdate/PaneUpdate are full snapshots, so only the last of each
+    /// kind matters — this keeps pre-grant buffering bounded.
+    buffered_tabs: Option<Vec<TabInfo>>,
+    buffered_panes: Option<PaneManifest>,
+    buffered_cwds: HashMap<u32, PathBuf>,
     /// Whether to detect git repos for tab naming (default: true)
     git_detection: bool,
     /// Format string for pane count suffix, e.g. " ({pane_count})"
     pane_count_format: Option<String>,
-    /// Stable tab_id → last base name we computed (without pane count)
+    /// Stable tab_id → last base name we computed (without decorations)
     applied_names: HashMap<usize, String>,
+    /// tab_id → last full name sent to zellij (skip redundant renames)
+    rendered_names: HashMap<usize, String>,
     /// Current non-plugin pane count per tab
     tab_pane_counts: HashMap<usize, usize>,
     /// Mapping: tab_index → stable tab_id
     index_to_id: HashMap<usize, usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
     pane_to_tab: HashMap<u32, usize>,
-    /// Git toplevel path → repo basename (cache to avoid re-running git)
-    git_roots: HashMap<String, String>,
-    /// Paths known to NOT be in a git repo
+    /// Git toplevel paths discovered so far (cache to avoid re-running git)
+    git_roots: HashSet<String>,
+    /// Paths known to NOT be in a git repo. Never invalidated: a `git init` in
+    /// an already-visited path goes unnoticed until the session restarts.
     not_git: HashSet<String>,
     /// CwdChanged events for pane_ids not yet in pane_to_tab
     pending_cwds: HashMap<u32, PathBuf>,
     /// Last known CWD per tab_id
     tab_cwds: HashMap<usize, PathBuf>,
-    /// CWDs currently awaiting a git rev-parse result (dedup in-flight git queries)
-    pending_git: HashSet<String>,
+    /// CWD with a git rev-parse in flight → tabs awaiting the result
+    pending_git: HashMap<String, Vec<usize>>,
     /// Tab ID of the previously active tab (before the current one)
     prev_active_tab_id: Option<usize>,
     /// Tab ID of the currently active tab
@@ -59,31 +66,47 @@ impl ZellijPlugin for State {
             .map(|v| v != "false")
             .unwrap_or(true);
         self.pane_count_format = config.get("pane_count").cloned();
-        request_permission(&[
+        self.home_dir = std::env::var("HOME").unwrap_or_default();
+
+        let mut permissions = vec![
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
-            PermissionType::RunCommands,
-        ]);
-        subscribe(&[
+        ];
+        let mut events = vec![
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::CwdChanged,
-            EventType::RunCommandResult,
             EventType::PermissionRequestResult,
-        ]);
-        self.home_dir = std::env::var("HOME").unwrap_or_default();
+        ];
+        if self.git_detection {
+            permissions.push(PermissionType::RunCommands);
+            events.push(EventType::RunCommandResult);
+        }
+        request_permission(&permissions);
+        subscribe(&events);
     }
 
     fn update(&mut self, event: Event) -> bool {
         if !self.got_permissions {
-            if let Event::PermissionRequestResult(PermissionStatus::Granted) = &event {
-                self.got_permissions = true;
-                let buffered = std::mem::take(&mut self.buffered_events);
-                for ev in buffered {
-                    self.handle_event(ev);
+            match event {
+                Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                    self.got_permissions = true;
+                    if let Some(tabs) = self.buffered_tabs.take() {
+                        self.on_tab_update(tabs);
+                    }
+                    if let Some(manifest) = self.buffered_panes.take() {
+                        self.on_pane_update(manifest);
+                    }
+                    for (terminal_id, cwd) in std::mem::take(&mut self.buffered_cwds) {
+                        self.on_cwd_changed(PaneId::Terminal(terminal_id), cwd);
+                    }
                 }
-            } else {
-                self.buffered_events.push(event);
+                Event::TabUpdate(tabs) => self.buffered_tabs = Some(tabs),
+                Event::PaneUpdate(manifest) => self.buffered_panes = Some(manifest),
+                Event::CwdChanged(PaneId::Terminal(terminal_id), cwd, _clients) => {
+                    self.buffered_cwds.insert(terminal_id, cwd);
+                }
+                _ => {}
             }
             return false;
         }
@@ -97,17 +120,24 @@ impl ZellijPlugin for State {
             unblock_cli_pipe_input(pipe_id);
         }
 
+        let args = &pipe_message.args;
         match pipe_message.name.as_str() {
-            "set_prefix" => self.handle_set_decoration(&pipe_message.args, Decoration::Prefix),
-            "set_suffix" => self.handle_set_decoration(&pipe_message.args, Decoration::Suffix),
-            "clear_prefix" => self.handle_clear_decoration(&pipe_message.args, Decoration::Prefix),
-            "clear_suffix" => self.handle_clear_decoration(&pipe_message.args, Decoration::Suffix),
+            "set_prefix" => {
+                let value = args.get("value").cloned().unwrap_or_default();
+                self.set_decoration(args, Decoration::Prefix, value);
+            }
+            "set_suffix" => {
+                let value = args.get("value").cloned().unwrap_or_default();
+                self.set_decoration(args, Decoration::Suffix, value);
+            }
+            "clear_prefix" => self.set_decoration(args, Decoration::Prefix, String::new()),
+            "clear_suffix" => self.set_decoration(args, Decoration::Suffix, String::new()),
             "clear_all" => {
-                if let Some(tab_id) = self.resolve_tab_id(&pipe_message.args) {
+                if let Some(tab_id) = self.resolve_tab_id(args) {
                     let had_prefix = self.tab_prefixes.remove(&tab_id).is_some();
                     let had_suffix = self.tab_suffixes.remove(&tab_id).is_some();
                     if had_prefix || had_suffix {
-                        self.reapply_name(tab_id);
+                        self.refresh_tab_name(tab_id);
                     }
                 }
             }
@@ -144,6 +174,7 @@ impl State {
 
         // GC stale entries for deleted tabs
         self.applied_names.retain(|id, _| alive_ids.contains(id));
+        self.rendered_names.retain(|id, _| alive_ids.contains(id));
         self.tab_cwds.retain(|id, _| alive_ids.contains(id));
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
         self.tab_prefixes.retain(|id, _| alive_ids.contains(id));
@@ -185,19 +216,32 @@ impl State {
         // Detect tabs whose pane count changed and re-apply their name
         let old_counts = std::mem::replace(&mut self.tab_pane_counts, new_counts);
         if self.pane_count_format.is_some() {
-            for (&tab_id, &new_count) in &self.tab_pane_counts {
-                let old_count = old_counts.get(&tab_id).copied().unwrap_or(0);
-                if old_count != new_count {
-                    self.reapply_name(tab_id);
-                }
+            let changed: Vec<usize> = self
+                .tab_pane_counts
+                .iter()
+                .filter(|(id, count)| old_counts.get(id).copied().unwrap_or(0) != **count)
+                .map(|(&id, _)| id)
+                .collect();
+            for tab_id in changed {
+                self.refresh_tab_name(tab_id);
             }
         }
 
-        // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still unresolved)
+        // Replay buffered CwdChanged events (on_cwd_changed re-buffers if still
+        // unresolved), then drop the ones whose pane no longer exists
         let pending = std::mem::take(&mut self.pending_cwds);
         for (terminal_id, cwd) in pending {
             self.on_cwd_changed(PaneId::Terminal(terminal_id), cwd);
         }
+        let manifest_pane_ids: HashSet<u32> = manifest
+            .panes
+            .values()
+            .flatten()
+            .filter(|p| !p.is_plugin)
+            .map(|p| p.id)
+            .collect();
+        self.pending_cwds
+            .retain(|id, _| manifest_pane_ids.contains(id));
 
         // For new panes in tabs without an applied name, use the previous tab's CWD
         for (pane_id, tab_id) in new_panes {
@@ -237,25 +281,19 @@ impl State {
             return;
         }
 
-        if let Some(repo_name) = self.find_git_root(&cwd_str) {
-            self.apply_name(tab_id, repo_name);
+        if let Some(waiters) = self.pending_git.get_mut(&cwd_str) {
+            if !waiters.contains(&tab_id) {
+                waiters.push(tab_id);
+            }
             return;
         }
 
-        if self.not_git.contains(&cwd_str) {
-            let name = self.derive_name(&cwd_str);
-            self.apply_name(tab_id, name);
+        if self.apply_cached_name(tab_id, &cwd_str) {
             return;
         }
 
-        if self.pending_git.contains(&cwd_str) {
-            return;
-        }
-        self.pending_git.insert(cwd_str.clone());
-
-        let mut context = BTreeMap::new();
-        context.insert(CTX_TAB_ID.to_string(), tab_id.to_string());
-        context.insert(CTX_CWD.to_string(), cwd_str);
+        self.pending_git.insert(cwd_str.clone(), vec![tab_id]);
+        let context = BTreeMap::from([(CTX_CWD.to_string(), cwd_str)]);
         run_command_with_env_variables_and_cwd(
             &["git", "rev-parse", "--show-toplevel"],
             BTreeMap::new(),
@@ -264,15 +302,26 @@ impl State {
         );
     }
 
-    /// Walk path ancestors and check if any is a known git root. O(depth) hash lookups.
+    /// Walk path ancestors and return the repo basename if any is a known git root.
     fn find_git_root(&self, cwd: &str) -> Option<String> {
-        let mut path = Path::new(cwd);
-        loop {
-            if let Some(repo_name) = self.git_roots.get(path.to_str()?) {
-                return Some(repo_name.clone());
-            }
-            path = path.parent()?;
-        }
+        Path::new(cwd)
+            .ancestors()
+            .filter_map(Path::to_str)
+            .find(|path| self.git_roots.contains(*path))
+            .map(basename)
+    }
+
+    /// Name the tab from the git caches; false if its cwd is in neither cache yet.
+    fn apply_cached_name(&mut self, tab_id: usize, cwd: &str) -> bool {
+        let name = if let Some(repo_name) = self.find_git_root(cwd) {
+            repo_name
+        } else if self.not_git.contains(cwd) {
+            self.derive_name(cwd)
+        } else {
+            return false;
+        };
+        self.apply_name(tab_id, name);
+        true
     }
 
     fn on_run_command_result(
@@ -281,57 +330,52 @@ impl State {
         stdout: Vec<u8>,
         context: BTreeMap<String, String>,
     ) {
-        if !self.git_detection {
-            return;
-        }
-        let Some(tab_id_str) = context.get(CTX_TAB_ID) else {
-            return;
-        };
-        let Ok(tab_id) = tab_id_str.parse::<usize>() else {
-            return;
-        };
         let Some(cwd) = context.get(CTX_CWD) else {
             return;
         };
-        self.pending_git.remove(cwd);
+        let waiters = self.pending_git.remove(cwd).unwrap_or_default();
 
         let toplevel = (exit_code == Some(0))
             .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let new_name = match toplevel {
-            Some(tl) => {
-                let repo_name = basename(&tl);
-                self.git_roots.insert(tl, repo_name.clone());
-                repo_name
+        match toplevel {
+            Some(toplevel) => {
+                self.git_roots.insert(toplevel);
             }
             None => {
                 self.not_git.insert(cwd.clone());
-                self.derive_name(cwd)
             }
+        }
+
+        // Re-resolve each waiter from its *current* cwd: a tab that moved on since
+        // this query was launched keeps its newer name (its own query handles it)
+        for tab_id in waiters {
+            let Some(tab_cwd) = self.tab_cwds.get(&tab_id) else {
+                continue;
+            };
+            let cwd_str = tab_cwd.to_string_lossy().to_string();
+            self.apply_cached_name(tab_id, &cwd_str);
+        }
+    }
+
+    fn apply_name(&mut self, tab_id: usize, base_name: String) {
+        self.applied_names.insert(tab_id, base_name);
+        self.refresh_tab_name(tab_id);
+    }
+
+    /// Compose prefix + base name + suffix + pane count and push it to zellij,
+    /// unless that exact name is already displayed.
+    fn refresh_tab_name(&mut self, tab_id: usize) {
+        let Some(base_name) = self.applied_names.get(&tab_id) else {
+            return;
         };
-
-        self.apply_name(tab_id, new_name);
-    }
-
-    fn apply_name(&mut self, tab_id: usize, new_name: String) {
-        let already_set = self
-            .applied_names
-            .get(&tab_id)
-            .is_some_and(|n| *n == new_name);
-
-        if !already_set {
-            let full_name = self.compose_full_name(tab_id, &new_name);
-            rename_tab_with_id(tab_id as u64, &full_name);
-            self.applied_names.insert(tab_id, new_name);
+        let full_name = self.compose_full_name(tab_id, base_name);
+        if self.rendered_names.get(&tab_id) == Some(&full_name) {
+            return;
         }
-    }
-
-    fn reapply_name(&self, tab_id: usize) {
-        if let Some(base_name) = self.applied_names.get(&tab_id) {
-            let full_name = self.compose_full_name(tab_id, base_name);
-            rename_tab_with_id(tab_id as u64, &full_name);
-        }
+        rename_tab_with_id(tab_id as u64, &full_name);
+        self.rendered_names.insert(tab_id, full_name);
     }
 
     fn compose_full_name(&self, tab_id: usize, base_name: &str) -> String {
@@ -360,11 +404,16 @@ impl State {
         }
     }
 
-    fn handle_set_decoration(&mut self, args: &BTreeMap<String, String>, decoration: Decoration) {
+    /// Set or clear (empty value) a tab's prefix/suffix, then re-render its name.
+    fn set_decoration(
+        &mut self,
+        args: &BTreeMap<String, String>,
+        decoration: Decoration,
+        value: String,
+    ) {
         let Some(tab_id) = self.resolve_tab_id(args) else {
             return;
         };
-        let value = args.get("value").cloned().unwrap_or_default();
         let map = match decoration {
             Decoration::Prefix => &mut self.tab_prefixes,
             Decoration::Suffix => &mut self.tab_suffixes,
@@ -378,20 +427,7 @@ impl State {
         } else {
             map.insert(tab_id, value);
         }
-        self.reapply_name(tab_id);
-    }
-
-    fn handle_clear_decoration(&mut self, args: &BTreeMap<String, String>, decoration: Decoration) {
-        let Some(tab_id) = self.resolve_tab_id(args) else {
-            return;
-        };
-        let removed = match decoration {
-            Decoration::Prefix => self.tab_prefixes.remove(&tab_id),
-            Decoration::Suffix => self.tab_suffixes.remove(&tab_id),
-        };
-        if removed.is_some() {
-            self.reapply_name(tab_id);
-        }
+        self.refresh_tab_name(tab_id);
     }
 
     fn derive_name(&self, cwd: &str) -> String {
