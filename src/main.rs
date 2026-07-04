@@ -59,8 +59,8 @@ struct State {
     /// Format string for pane count suffix, e.g. " ({pane_count})"
     pane_count_format: Option<String>,
     /// Stable tab_id → last base name we computed (without decorations)
-    applied_names: HashMap<usize, String>,
-    /// tab_id → last full name sent to zellij (skip redundant renames)
+    base_names: HashMap<usize, String>,
+    /// tab_id → last rendered name sent to zellij (skip redundant renames)
     rendered_names: HashMap<usize, String>,
     /// Current non-plugin pane count per tab
     tab_pane_counts: HashMap<usize, usize>,
@@ -71,7 +71,7 @@ struct State {
     floating_visible: HashSet<usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
     pane_to_tab: HashMap<u32, usize>,
-    /// Git toplevel paths discovered so far (cache to avoid re-running git)
+    /// Git roots discovered so far (cache to avoid re-running git)
     git_roots: HashSet<String>,
     /// Paths known to NOT be in a git repo. Never invalidated: a `git init` in
     /// an already-visited path goes unnoticed until the session restarts.
@@ -280,7 +280,7 @@ impl State {
         }
 
         // GC stale entries for deleted tabs
-        self.applied_names.retain(|id, _| alive_ids.contains(id));
+        self.base_names.retain(|id, _| alive_ids.contains(id));
         self.rendered_names.retain(|id, _| alive_ids.contains(id));
         self.tab_cwds.retain(|id, _| alive_ids.contains(id));
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
@@ -366,7 +366,7 @@ impl State {
         // Discovery query (ADR-0002): name tabs that still have no base name
         // from the actual cwd of the focused pane in their visible layer
         for (tab_id, tab_index) in tabs_with_new_panes {
-            if self.applied_names.contains_key(&tab_id) || self.tab_cwds.contains_key(&tab_id) {
+            if self.base_names.contains_key(&tab_id) || self.tab_cwds.contains_key(&tab_id) {
                 continue;
             }
             let Some(panes) = manifest.panes.get(&tab_index) else {
@@ -439,7 +439,7 @@ impl State {
         self.effects.push(Effect::RunGit { cwd, context });
     }
 
-    /// Walk path ancestors and return the repo basename if any is a known git root.
+    /// Walk path ancestors and return the git root's basename if one is known.
     fn find_git_root(&self, cwd: &str) -> Option<String> {
         Path::new(cwd)
             .ancestors()
@@ -472,13 +472,13 @@ impl State {
         };
         let waiters = self.pending_git.remove(cwd).unwrap_or_default();
 
-        let toplevel = (exit_code == Some(0))
+        let git_root = (exit_code == Some(0))
             .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
             .filter(|s| !s.is_empty());
 
-        match toplevel {
-            Some(toplevel) => {
-                self.git_roots.insert(toplevel);
+        match git_root {
+            Some(git_root) => {
+                self.git_roots.insert(git_root);
             }
             None => {
                 self.not_git.insert(cwd.clone());
@@ -497,28 +497,28 @@ impl State {
     }
 
     fn apply_name(&mut self, tab_id: usize, base_name: String) {
-        self.applied_names.insert(tab_id, base_name);
+        self.base_names.insert(tab_id, base_name);
         self.refresh_tab_name(tab_id);
     }
 
     /// Compose prefix + base name + suffix + pane count and emit a rename,
     /// unless that exact name is already displayed.
     fn refresh_tab_name(&mut self, tab_id: usize) {
-        let Some(base_name) = self.applied_names.get(&tab_id) else {
+        let Some(base_name) = self.base_names.get(&tab_id) else {
             return;
         };
-        let full_name = self.compose_full_name(tab_id, base_name);
-        if self.rendered_names.get(&tab_id) == Some(&full_name) {
+        let rendered_name = self.compose_rendered_name(tab_id, base_name);
+        if self.rendered_names.get(&tab_id) == Some(&rendered_name) {
             return;
         }
         self.effects.push(Effect::RenameTab {
             tab_id,
-            name: full_name.clone(),
+            name: rendered_name.clone(),
         });
-        self.rendered_names.insert(tab_id, full_name);
+        self.rendered_names.insert(tab_id, rendered_name);
     }
 
-    fn compose_full_name(&self, tab_id: usize, base_name: &str) -> String {
+    fn compose_rendered_name(&self, tab_id: usize, base_name: &str) -> String {
         let prefix = self
             .tab_prefixes
             .get(&tab_id)
