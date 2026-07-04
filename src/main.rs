@@ -50,7 +50,10 @@ struct State {
     /// kind matters — this keeps pre-grant buffering bounded.
     buffered_tabs: Option<Vec<TabInfo>>,
     buffered_panes: Option<PaneManifest>,
-    buffered_cwds: HashMap<u32, PathBuf>,
+    buffered_cwds: Vec<(u32, PathBuf)>,
+    /// PaneManifest whose tab positions weren't all mapped yet (a PaneUpdate
+    /// raced ahead of its TabUpdate); replayed after the next TabUpdate
+    deferred_panes: Option<PaneManifest>,
     /// Whether to detect git repos for tab naming (default: true)
     git_detection: bool,
     /// Format string for pane count suffix, e.g. " ({pane_count})"
@@ -63,6 +66,9 @@ struct State {
     tab_pane_counts: HashMap<usize, usize>,
     /// Mapping: tab_index → stable tab_id
     index_to_id: HashMap<usize, usize>,
+    /// Tabs whose floating-pane layer is currently visible (is_focused on a
+    /// PaneInfo is per-layer, so the visible layer decides who speaks)
+    floating_visible: HashSet<usize>,
     /// Mapping: pane_id → tab_id (to resolve CwdChanged events)
     pane_to_tab: HashMap<u32, usize>,
     /// Git toplevel paths discovered so far (cache to avoid re-running git)
@@ -70,8 +76,9 @@ struct State {
     /// Paths known to NOT be in a git repo. Never invalidated: a `git init` in
     /// an already-visited path goes unnoticed until the session restarts.
     not_git: HashSet<String>,
-    /// CwdChanged events for pane_ids not yet in pane_to_tab
-    pending_cwds: HashMap<u32, PathBuf>,
+    /// CwdChanged events for pane_ids not yet in pane_to_tab — latest event per
+    /// pane, kept in arrival order so replay stays deterministic
+    pending_cwds: Vec<(u32, PathBuf)>,
     /// Last known CWD per tab_id
     tab_cwds: HashMap<usize, PathBuf>,
     /// CWD with a git rev-parse in flight → tabs awaiting the result
@@ -198,17 +205,19 @@ impl State {
                     if let Some(tabs) = self.buffered_tabs.take() {
                         self.on_tab_update(tabs);
                     }
+                    // route buffered cwds through pending_cwds: on_pane_update
+                    // resolves them before deciding which tabs still need a
+                    // discovery query (pending is empty pre-grant)
+                    self.pending_cwds
+                        .extend(std::mem::take(&mut self.buffered_cwds));
                     if let Some(manifest) = self.buffered_panes.take() {
                         self.on_pane_update(manifest);
-                    }
-                    for (terminal_id, cwd) in std::mem::take(&mut self.buffered_cwds) {
-                        self.on_cwd_changed(PaneId::Terminal(terminal_id), cwd);
                     }
                 }
                 Event::TabUpdate(tabs) => self.buffered_tabs = Some(tabs),
                 Event::PaneUpdate(manifest) => self.buffered_panes = Some(manifest),
                 Event::CwdChanged(PaneId::Terminal(terminal_id), cwd, _clients) => {
-                    self.buffered_cwds.insert(terminal_id, cwd);
+                    upsert_cwd(&mut self.buffered_cwds, terminal_id, cwd);
                 }
                 _ => {}
             }
@@ -279,18 +288,31 @@ impl State {
         self.tab_suffixes.retain(|id, _| alive_ids.contains(id));
 
         self.index_to_id.clear();
+        self.floating_visible.clear();
         for tab in &tabs {
             self.index_to_id.insert(tab.position, tab.tab_id);
+            if tab.are_floating_panes_visible {
+                self.floating_visible.insert(tab.tab_id);
+            }
+        }
+
+        // A PaneUpdate that raced ahead of this TabUpdate can now be resolved
+        if let Some(manifest) = self.deferred_panes.take() {
+            self.on_pane_update(manifest);
         }
     }
 
     fn on_pane_update(&mut self, manifest: PaneManifest) {
+        // a newer manifest supersedes any deferred one
+        self.deferred_panes = None;
         let old_pane_to_tab = std::mem::take(&mut self.pane_to_tab);
         let mut tabs_with_new_panes: Vec<(usize, usize)> = Vec::new();
         let mut new_counts: HashMap<usize, usize> = HashMap::new();
+        let mut has_unmapped_tab = false;
 
         for (tab_index, panes) in &manifest.panes {
             let Some(&tab_id) = self.index_to_id.get(tab_index) else {
+                has_unmapped_tab = true;
                 continue;
             };
             let mut count = 0usize;
@@ -298,7 +320,8 @@ impl State {
             for pane in panes {
                 if !pane.is_plugin {
                     count += 1;
-                    if !old_pane_to_tab.contains_key(&pane.id) {
+                    // new to this tab: brand new, or moved from another tab
+                    if old_pane_to_tab.get(&pane.id) != Some(&tab_id) {
                         has_new_pane = true;
                     }
                     self.pane_to_tab.insert(pane.id, tab_id);
@@ -338,10 +361,10 @@ impl State {
             .map(|p| p.id)
             .collect();
         self.pending_cwds
-            .retain(|id, _| manifest_pane_ids.contains(id));
+            .retain(|(id, _)| manifest_pane_ids.contains(id));
 
         // Discovery query (ADR-0002): name tabs that still have no base name
-        // from the actual cwd of their focused pane (fallback: first terminal)
+        // from the actual cwd of the focused pane in their visible layer
         for (tab_id, tab_index) in tabs_with_new_panes {
             if self.applied_names.contains_key(&tab_id) || self.tab_cwds.contains_key(&tab_id) {
                 continue;
@@ -349,15 +372,30 @@ impl State {
             let Some(panes) = manifest.panes.get(&tab_index) else {
                 continue;
             };
-            let chosen = panes
-                .iter()
-                .filter(|p| !p.is_plugin)
-                .find(|p| p.is_focused)
-                .or_else(|| panes.iter().find(|p| !p.is_plugin));
-            if let Some(pane) = chosen {
-                self.effects.push(Effect::QueryPaneCwd { pane_id: pane.id });
+            if let Some(pane_id) = self.choose_discovery_pane(tab_id, panes) {
+                self.effects.push(Effect::QueryPaneCwd { pane_id });
             }
         }
+
+        // PaneUpdate raced ahead of TabUpdate: keep the manifest for replay
+        // once the next TabUpdate maps the missing tab positions
+        if has_unmapped_tab {
+            self.deferred_panes = Some(manifest);
+        }
+    }
+
+    /// Pick the pane whose cwd names the tab: the focused pane of the visible
+    /// layer (is_focused is per-layer), then any focused pane, then the first
+    /// candidate of the visible layer, then any candidate.
+    fn choose_discovery_pane(&self, tab_id: usize, panes: &[PaneInfo]) -> Option<u32> {
+        let want_floating = self.floating_visible.contains(&tab_id);
+        let candidates = || panes.iter().filter(|p| !p.is_plugin && !p.is_suppressed);
+        candidates()
+            .find(|p| p.is_focused && p.is_floating == want_floating)
+            .or_else(|| candidates().find(|p| p.is_focused))
+            .or_else(|| candidates().find(|p| p.is_floating == want_floating))
+            .or_else(|| candidates().next())
+            .map(|p| p.id)
     }
 
     fn on_cwd_changed(&mut self, pane_id: PaneId, cwd: PathBuf) {
@@ -366,16 +404,18 @@ impl State {
         };
 
         let Some(&tab_id) = self.pane_to_tab.get(&terminal_id) else {
-            self.pending_cwds.insert(terminal_id, cwd);
+            upsert_cwd(&mut self.pending_cwds, terminal_id, cwd);
             return;
         };
 
-        self.tab_cwds.insert(tab_id, cwd.clone());
-
+        // an empty cwd must leave no trace: recording it in tab_cwds would
+        // wrongly convince the discovery that the tab is already resolved
         let cwd_str = cwd.to_string_lossy().to_string();
         if cwd_str.is_empty() {
             return;
         }
+
+        self.tab_cwds.insert(tab_id, cwd.clone());
 
         if !self.git_detection {
             let name = self.derive_name(&cwd_str);
@@ -546,6 +586,13 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
+/// Keep only the latest cwd per pane, in arrival order of the latest events,
+/// so replay is deterministic and faithful to the live last-write-wins flow.
+fn upsert_cwd(list: &mut Vec<(u32, PathBuf)>, terminal_id: u32, cwd: PathBuf) {
+    list.retain(|(id, _)| *id != terminal_id);
+    list.push((terminal_id, cwd));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,16 +729,119 @@ mod tests {
         assert_eq!(state.handle(cwd_event(10, "/proj/api")), vec![]);
 
         let effects = state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        // the buffered cwd resolves the tab before discovery: no redundant query
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "api".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn pane_update_before_tab_update_defers_discovery() {
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+
+        // PaneUpdate races ahead of the TabUpdate that maps position 0
+        assert_eq!(
+            state.handle(Event::PaneUpdate(manifest(&[(0, &[10])]))),
+            vec![]
+        );
+        let effects = state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 10 }]);
+    }
+
+    #[test]
+    fn moved_pane_triggers_discovery_for_its_new_tab() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
+        state.handle(cwd_event(10, "/proj"));
+
+        // pane 11 breaks out into a brand-new tab
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[11])])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 11 }]);
+    }
+
+    #[test]
+    fn empty_cwd_does_not_block_discovery() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        // an empty cwd must leave no trace
+        assert_eq!(state.handle(cwd_event(10, "")), vec![]);
+
+        // a later split finds the tab still unresolved: discovery fires
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 10 }]);
+    }
+
+    #[test]
+    fn buffered_cwds_replay_in_arrival_order() {
+        let mut state = State::default();
+        state.init(
+            BTreeMap::from([("git_detection".to_string(), "false".to_string())]),
+            String::new(),
+        );
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
+        // two panes of the same tab report different cwds before the grant
+        state.handle(cwd_event(10, "/proj/api"));
+        state.handle(cwd_event(11, "/proj/web"));
+
+        let effects = state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        // deterministic: the last arrival names the tab last
         assert_eq!(
             effects,
             vec![
-                Effect::QueryPaneCwd { pane_id: 10 },
                 Effect::RenameTab {
                     tab_id: 1,
                     name: "api".to_string(),
                 },
+                Effect::RenameTab {
+                    tab_id: 1,
+                    name: "web".to_string(),
+                },
             ]
         );
+    }
+
+    #[test]
+    fn discovery_ignores_focused_pane_of_hidden_floating_layer() {
+        fn layered_panes() -> Vec<PaneInfo> {
+            vec![
+                PaneInfo {
+                    id: 10,
+                    is_focused: true,
+                    ..Default::default()
+                },
+                PaneInfo {
+                    id: 11,
+                    is_focused: true,
+                    is_floating: true,
+                    ..Default::default()
+                },
+            ]
+        }
+
+        // floating layer hidden: the focused tiled pane speaks for the tab
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+        let effects = state.handle(Event::PaneUpdate(manifest_with(vec![(0, layered_panes())])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 10 }]);
+
+        // floating layer visible: the focused floating pane wins
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        let mut floating_tab = tab(1, 0, true);
+        floating_tab.are_floating_panes_visible = true;
+        state.handle(Event::TabUpdate(vec![floating_tab]));
+        let effects = state.handle(Event::PaneUpdate(manifest_with(vec![(0, layered_panes())])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 11 }]);
     }
 
     #[test]
