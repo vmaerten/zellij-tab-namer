@@ -1,8 +1,32 @@
+// On native (cargo test) only the pure core is compiled; without the wasm
+// entrypoint most items look unused to rustc.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use zellij_tile::prelude::*;
 
 const CTX_CWD: &str = "cwd";
+
+/// Everything the plugin can do to the world. The core only emits these;
+/// `apply` in the ZellijPlugin adapter is the sole place they are executed.
+#[derive(Debug, Clone, PartialEq)]
+enum Effect {
+    RequestPermissions(Vec<PermissionType>),
+    Subscribe(Vec<EventType>),
+    RenameTab {
+        tab_id: usize,
+        name: String,
+    },
+    /// Launch `git rev-parse --show-toplevel` in `cwd`. The context is echoed
+    /// back by zellij in RunCommandResult — the correlation protocol (build
+    /// and parse) lives entirely in the core.
+    RunGit {
+        cwd: PathBuf,
+        context: BTreeMap<String, String>,
+    },
+    UnblockCliPipe(String),
+}
 
 enum Decoration {
     Prefix,
@@ -11,6 +35,9 @@ enum Decoration {
 
 #[derive(Default)]
 struct State {
+    /// Effects queued by the current `init`/`handle`/`handle_pipe` call,
+    /// drained into its return value.
+    effects: Vec<Effect>,
     got_permissions: bool,
     /// Latest state snapshots seen before permissions were granted, replayed on
     /// grant. TabUpdate/PaneUpdate are full snapshots, so only the last of each
@@ -57,16 +84,70 @@ struct State {
     home_dir: String,
 }
 
+#[cfg(target_arch = "wasm32")]
 register_plugin!(State);
 
+// ─── Adapter: the only place plugin behaviour touches the zellij host ───────
+// wasm-only: the host functions are extern symbols that don't exist on native,
+// so the linker itself guarantees the core below stays free of host calls.
+
+#[cfg(target_arch = "wasm32")]
 impl ZellijPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
+        let home_dir = std::env::var("HOME").unwrap_or_default();
+        for effect in self.init(config, home_dir) {
+            apply(effect);
+        }
+    }
+
+    fn update(&mut self, event: Event) -> bool {
+        for effect in self.handle(event) {
+            apply(effect);
+        }
+        false
+    }
+
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        for effect in self.handle_pipe(pipe_message) {
+            apply(effect);
+        }
+        false
+    }
+
+    fn render(&mut self, _rows: usize, _cols: usize) {}
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply(effect: Effect) {
+    match effect {
+        Effect::RequestPermissions(permissions) => request_permission(&permissions),
+        Effect::Subscribe(events) => subscribe(&events),
+        Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id as u64, &name),
+        Effect::RunGit { cwd, context } => run_command_with_env_variables_and_cwd(
+            &["git", "rev-parse", "--show-toplevel"],
+            BTreeMap::new(),
+            cwd,
+            context,
+        ),
+        Effect::UnblockCliPipe(pipe_id) => unblock_cli_pipe_input(&pipe_id),
+    }
+}
+
+/// The real entrypoint comes from register_plugin! on wasm; this keeps
+/// native builds (cargo test / check) linkable.
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {}
+
+// ─── Core: pure state machine — events in, effects out ──────────────────────
+
+impl State {
+    fn init(&mut self, config: BTreeMap<String, String>, home_dir: String) -> Vec<Effect> {
         self.git_detection = config
             .get("git_detection")
             .map(|v| v != "false")
             .unwrap_or(true);
         self.pane_count_format = config.get("pane_count").cloned();
-        self.home_dir = std::env::var("HOME").unwrap_or_default();
+        self.home_dir = home_dir;
 
         let mut permissions = vec![
             PermissionType::ReadApplicationState,
@@ -82,11 +163,12 @@ impl ZellijPlugin for State {
             permissions.push(PermissionType::RunCommands);
             events.push(EventType::RunCommandResult);
         }
-        request_permission(&permissions);
-        subscribe(&events);
+        self.effects.push(Effect::RequestPermissions(permissions));
+        self.effects.push(Effect::Subscribe(events));
+        std::mem::take(&mut self.effects)
     }
 
-    fn update(&mut self, event: Event) -> bool {
+    fn handle(&mut self, event: Event) -> Vec<Effect> {
         if !self.got_permissions {
             match event {
                 Event::PermissionRequestResult(PermissionStatus::Granted) => {
@@ -108,16 +190,15 @@ impl ZellijPlugin for State {
                 }
                 _ => {}
             }
-            return false;
+        } else {
+            self.handle_event(event);
         }
-
-        self.handle_event(event);
-        false
+        std::mem::take(&mut self.effects)
     }
 
-    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+    fn handle_pipe(&mut self, pipe_message: PipeMessage) -> Vec<Effect> {
         if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-            unblock_cli_pipe_input(pipe_id);
+            self.effects.push(Effect::UnblockCliPipe(pipe_id.clone()));
         }
 
         let args = &pipe_message.args;
@@ -143,13 +224,9 @@ impl ZellijPlugin for State {
             }
             _ => {}
         }
-        false
+        std::mem::take(&mut self.effects)
     }
 
-    fn render(&mut self, _rows: usize, _cols: usize) {}
-}
-
-impl State {
     fn handle_event(&mut self, event: Event) {
         match event {
             Event::TabUpdate(tabs) => self.on_tab_update(tabs),
@@ -294,12 +371,7 @@ impl State {
 
         self.pending_git.insert(cwd_str.clone(), vec![tab_id]);
         let context = BTreeMap::from([(CTX_CWD.to_string(), cwd_str)]);
-        run_command_with_env_variables_and_cwd(
-            &["git", "rev-parse", "--show-toplevel"],
-            BTreeMap::new(),
-            cwd,
-            context,
-        );
+        self.effects.push(Effect::RunGit { cwd, context });
     }
 
     /// Walk path ancestors and return the repo basename if any is a known git root.
@@ -364,7 +436,7 @@ impl State {
         self.refresh_tab_name(tab_id);
     }
 
-    /// Compose prefix + base name + suffix + pane count and push it to zellij,
+    /// Compose prefix + base name + suffix + pane count and emit a rename,
     /// unless that exact name is already displayed.
     fn refresh_tab_name(&mut self, tab_id: usize) {
         let Some(base_name) = self.applied_names.get(&tab_id) else {
@@ -374,7 +446,10 @@ impl State {
         if self.rendered_names.get(&tab_id) == Some(&full_name) {
             return;
         }
-        rename_tab_with_id(tab_id as u64, &full_name);
+        self.effects.push(Effect::RenameTab {
+            tab_id,
+            name: full_name.clone(),
+        });
         self.rendered_names.insert(tab_id, full_name);
     }
 
@@ -444,4 +519,313 @@ fn basename(path: &str) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("/")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(id: usize, position: usize, active: bool) -> TabInfo {
+        TabInfo {
+            tab_id: id,
+            position,
+            active,
+            ..Default::default()
+        }
+    }
+
+    fn manifest(entries: &[(usize, &[u32])]) -> PaneManifest {
+        let panes = entries
+            .iter()
+            .map(|(position, pane_ids)| {
+                let panes = pane_ids
+                    .iter()
+                    .map(|&id| PaneInfo {
+                        id,
+                        ..Default::default()
+                    })
+                    .collect();
+                (*position, panes)
+            })
+            .collect();
+        PaneManifest { panes }
+    }
+
+    fn cwd_event(pane_id: u32, path: &str) -> Event {
+        Event::CwdChanged(
+            PaneId::Terminal(pane_id),
+            PathBuf::from(path),
+            Default::default(),
+        )
+    }
+
+    fn ctx(cwd: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(CTX_CWD.to_string(), cwd.to_string())])
+    }
+
+    fn git_result(exit_code: i32, stdout: &str, cwd: &str) -> Event {
+        Event::RunCommandResult(
+            Some(exit_code),
+            stdout.as_bytes().to_vec(),
+            Vec::new(),
+            ctx(cwd),
+        )
+    }
+
+    fn pipe_msg(name: &str, args: &[(&str, &str)]) -> PipeMessage {
+        PipeMessage {
+            source: PipeSource::Plugin(0),
+            name: name.to_string(),
+            payload: None,
+            args: args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            is_private: false,
+        }
+    }
+
+    /// Permissions granted, one active tab (id 1, position 0) holding pane 10.
+    fn ready_state(config: &[(&str, &str)]) -> State {
+        let mut state = State::default();
+        let config = config
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        state.init(config, "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
+        state
+    }
+
+    #[test]
+    fn init_gates_run_commands_on_git_detection() {
+        let mut state = State::default();
+        let effects = state.init(BTreeMap::new(), String::new());
+        assert_eq!(
+            effects,
+            vec![
+                Effect::RequestPermissions(vec![
+                    PermissionType::ReadApplicationState,
+                    PermissionType::ChangeApplicationState,
+                    PermissionType::RunCommands,
+                ]),
+                Effect::Subscribe(vec![
+                    EventType::TabUpdate,
+                    EventType::PaneUpdate,
+                    EventType::CwdChanged,
+                    EventType::PermissionRequestResult,
+                    EventType::RunCommandResult,
+                ]),
+            ]
+        );
+
+        let mut state = State::default();
+        let config = BTreeMap::from([("git_detection".to_string(), "false".to_string())]);
+        let effects = state.init(config, String::new());
+        assert_eq!(
+            effects[0],
+            Effect::RequestPermissions(vec![
+                PermissionType::ReadApplicationState,
+                PermissionType::ChangeApplicationState,
+            ])
+        );
+    }
+
+    #[test]
+    fn buffers_events_until_permission_granted() {
+        let mut state = State::default();
+        state.init(
+            BTreeMap::from([("git_detection".to_string(), "false".to_string())]),
+            String::new(),
+        );
+        assert_eq!(
+            state.handle(Event::TabUpdate(vec![tab(1, 0, true)])),
+            vec![]
+        );
+        assert_eq!(
+            state.handle(Event::PaneUpdate(manifest(&[(0, &[10])]))),
+            vec![]
+        );
+        assert_eq!(state.handle(cwd_event(10, "/proj/api")), vec![]);
+
+        let effects = state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "api".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn git_result_renames_every_tab_waiting_on_the_same_cwd() {
+        let mut state = ready_state(&[]);
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[20])])));
+
+        let effects = state.handle(cwd_event(10, "/repo"));
+        assert_eq!(
+            effects,
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/repo"),
+                context: ctx("/repo"),
+            }]
+        );
+
+        // second tab, same cwd: joins the waiters, no duplicate query
+        assert_eq!(state.handle(cwd_event(20, "/repo")), vec![]);
+
+        let effects = state.handle(git_result(0, "/repo\n", "/repo"));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::RenameTab {
+                    tab_id: 1,
+                    name: "repo".to_string(),
+                },
+                Effect::RenameTab {
+                    tab_id: 2,
+                    name: "repo".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_git_result_does_not_overwrite_newer_name() {
+        let mut state = ready_state(&[]);
+
+        assert_eq!(
+            state.handle(cwd_event(10, "/repo-a")),
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/repo-a"),
+                context: ctx("/repo-a"),
+            }]
+        );
+        assert_eq!(
+            state.handle(cwd_event(10, "/elsewhere")),
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/elsewhere"),
+                context: ctx("/elsewhere"),
+            }]
+        );
+
+        // /elsewhere resolves first: not a git repo, named by basename
+        let effects = state.handle(git_result(128, "", "/elsewhere"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "elsewhere".to_string(),
+            }]
+        );
+
+        // the stale result for /repo-a lands afterwards: the tab moved on, no rename
+        assert_eq!(state.handle(git_result(0, "/repo-a\n", "/repo-a")), vec![]);
+    }
+
+    #[test]
+    fn home_directory_renders_as_tilde() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        let effects = state.handle(cwd_event(10, "/home/u"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "~".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn pane_count_suffix_follows_pane_count_changes() {
+        let mut state = ready_state(&[
+            ("git_detection", "false"),
+            ("pane_count", " ({pane_count})"),
+        ]);
+        state.handle(cwd_event(10, "/proj"));
+
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "proj (2)".to_string(),
+            }]
+        );
+
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "proj".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn pipe_decorations_wrap_the_base_name() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        state.handle(cwd_event(10, "/proj"));
+
+        let effects = state.handle_pipe(pipe_msg("set_prefix", &[("value", "* ")]));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "* proj".to_string(),
+            }]
+        );
+
+        // setting the same prefix again is a no-op
+        assert_eq!(
+            state.handle_pipe(pipe_msg("set_prefix", &[("value", "* ")])),
+            vec![]
+        );
+
+        let effects = state.handle_pipe(pipe_msg("clear_prefix", &[]));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "proj".to_string(),
+            }]
+        );
+
+        // clearing when nothing is set stays silent
+        assert_eq!(state.handle_pipe(pipe_msg("clear_prefix", &[])), vec![]);
+    }
+
+    #[test]
+    fn cli_pipe_source_is_unblocked() {
+        let mut state = ready_state(&[]);
+        let message = PipeMessage {
+            source: PipeSource::Cli("pipe-1".to_string()),
+            name: "unknown".to_string(),
+            payload: None,
+            args: BTreeMap::new(),
+            is_private: false,
+        };
+        assert_eq!(
+            state.handle_pipe(message),
+            vec![Effect::UnblockCliPipe("pipe-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn buffered_cwd_for_a_closed_pane_is_dropped() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        // cwd for a pane zellij hasn't mapped yet: buffered
+        assert_eq!(state.handle(cwd_event(99, "/ghost")), vec![]);
+        // next manifest doesn't contain pane 99: the buffered cwd is dropped
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
+        // even when pane 99 later appears in a new tab, the stale cwd is gone
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[99])])));
+        assert_eq!(effects, vec![]);
+    }
 }
