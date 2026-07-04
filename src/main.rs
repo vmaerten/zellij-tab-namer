@@ -9,7 +9,7 @@ use zellij_tile::prelude::*;
 const CTX_CWD: &str = "cwd";
 
 /// Everything the plugin can do to the world. The core only emits these;
-/// `apply` in the ZellijPlugin adapter is the sole place they are executed.
+/// `drive` in the ZellijPlugin adapter is the sole place they are executed.
 #[derive(Debug, Clone, PartialEq)]
 enum Effect {
     RequestPermissions(Vec<PermissionType>),
@@ -24,6 +24,12 @@ enum Effect {
     RunGit {
         cwd: PathBuf,
         context: BTreeMap<String, String>,
+    },
+    /// Discovery query (ADR-0002): ask for a terminal pane's current cwd; the
+    /// adapter feeds the answer back into the core as a synthetic CwdChanged.
+    /// Responses never emit further queries, keeping the adapter loop bounded.
+    QueryPaneCwd {
+        pane_id: u32,
     },
     UnblockCliPipe(String),
 }
@@ -70,8 +76,6 @@ struct State {
     tab_cwds: HashMap<usize, PathBuf>,
     /// CWD with a git rev-parse in flight → tabs awaiting the result
     pending_git: HashMap<String, Vec<usize>>,
-    /// Tab ID of the previously active tab (before the current one)
-    prev_active_tab_id: Option<usize>,
     /// Tab ID of the currently active tab
     active_tab_id: Option<usize>,
 
@@ -95,22 +99,19 @@ register_plugin!(State);
 impl ZellijPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
         let home_dir = std::env::var("HOME").unwrap_or_default();
-        for effect in self.init(config, home_dir) {
-            apply(effect);
-        }
+        let effects = self.init(config, home_dir);
+        self.drive(effects);
     }
 
     fn update(&mut self, event: Event) -> bool {
-        for effect in self.handle(event) {
-            apply(effect);
-        }
+        let effects = self.handle(event);
+        self.drive(effects);
         false
     }
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        for effect in self.handle_pipe(pipe_message) {
-            apply(effect);
-        }
+        let effects = self.handle_pipe(pipe_message);
+        self.drive(effects);
         false
     }
 
@@ -118,18 +119,39 @@ impl ZellijPlugin for State {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn apply(effect: Effect) {
-    match effect {
-        Effect::RequestPermissions(permissions) => request_permission(&permissions),
-        Effect::Subscribe(events) => subscribe(&events),
-        Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id as u64, &name),
-        Effect::RunGit { cwd, context } => run_command_with_env_variables_and_cwd(
-            &["git", "rev-parse", "--show-toplevel"],
-            BTreeMap::new(),
-            cwd,
-            context,
-        ),
-        Effect::UnblockCliPipe(pipe_id) => unblock_cli_pipe_input(&pipe_id),
+impl State {
+    /// Execute effects against the host. Discovery-query answers are fed back
+    /// into the core as synthetic CwdChanged events; the loop is bounded
+    /// because responses never emit further queries.
+    fn drive(&mut self, mut effects: Vec<Effect>) {
+        while !effects.is_empty() {
+            let mut reinjected = Vec::new();
+            for effect in effects {
+                match effect {
+                    Effect::RequestPermissions(permissions) => request_permission(&permissions),
+                    Effect::Subscribe(events) => subscribe(&events),
+                    Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id as u64, &name),
+                    Effect::RunGit { cwd, context } => run_command_with_env_variables_and_cwd(
+                        &["git", "rev-parse", "--show-toplevel"],
+                        BTreeMap::new(),
+                        cwd,
+                        context,
+                    ),
+                    Effect::QueryPaneCwd { pane_id } => {
+                        // failed query: stay silent, the first CwdChanged takes over
+                        if let Ok(cwd) = get_pane_cwd(PaneId::Terminal(pane_id)) {
+                            reinjected.extend(self.handle(Event::CwdChanged(
+                                PaneId::Terminal(pane_id),
+                                cwd,
+                                Default::default(),
+                            )));
+                        }
+                    }
+                    Effect::UnblockCliPipe(pipe_id) => unblock_cli_pipe_input(&pipe_id),
+                }
+            }
+            effects = reinjected;
+        }
     }
 }
 
@@ -243,8 +265,7 @@ impl State {
         let alive_ids: HashSet<usize> = tabs.iter().map(|t| t.tab_id).collect();
 
         for tab in &tabs {
-            if tab.active && self.active_tab_id != Some(tab.tab_id) {
-                self.prev_active_tab_id = self.active_tab_id;
+            if tab.active {
                 self.active_tab_id = Some(tab.tab_id);
             }
         }
@@ -256,11 +277,6 @@ impl State {
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
         self.tab_prefixes.retain(|id, _| alive_ids.contains(id));
         self.tab_suffixes.retain(|id, _| alive_ids.contains(id));
-        if let Some(id) = self.prev_active_tab_id {
-            if !alive_ids.contains(&id) {
-                self.prev_active_tab_id = None;
-            }
-        }
 
         self.index_to_id.clear();
         for tab in &tabs {
@@ -270,7 +286,7 @@ impl State {
 
     fn on_pane_update(&mut self, manifest: PaneManifest) {
         let old_pane_to_tab = std::mem::take(&mut self.pane_to_tab);
-        let mut new_panes: Vec<(u32, usize)> = Vec::new();
+        let mut tabs_with_new_panes: Vec<(usize, usize)> = Vec::new();
         let mut new_counts: HashMap<usize, usize> = HashMap::new();
 
         for (tab_index, panes) in &manifest.panes {
@@ -278,16 +294,20 @@ impl State {
                 continue;
             };
             let mut count = 0usize;
+            let mut has_new_pane = false;
             for pane in panes {
                 if !pane.is_plugin {
                     count += 1;
                     if !old_pane_to_tab.contains_key(&pane.id) {
-                        new_panes.push((pane.id, tab_id));
+                        has_new_pane = true;
                     }
                     self.pane_to_tab.insert(pane.id, tab_id);
                 }
             }
             new_counts.insert(tab_id, count);
+            if has_new_pane {
+                tabs_with_new_panes.push((tab_id, *tab_index));
+            }
         }
 
         // Detect tabs whose pane count changed and re-apply their name
@@ -320,17 +340,22 @@ impl State {
         self.pending_cwds
             .retain(|id, _| manifest_pane_ids.contains(id));
 
-        // For new panes in tabs without an applied name, use the previous tab's CWD
-        for (pane_id, tab_id) in new_panes {
+        // Discovery query (ADR-0002): name tabs that still have no base name
+        // from the actual cwd of their focused pane (fallback: first terminal)
+        for (tab_id, tab_index) in tabs_with_new_panes {
             if self.applied_names.contains_key(&tab_id) || self.tab_cwds.contains_key(&tab_id) {
                 continue;
             }
-            let cwd = self
-                .prev_active_tab_id
-                .and_then(|id| self.tab_cwds.get(&id))
-                .cloned();
-            if let Some(cwd) = cwd {
-                self.on_cwd_changed(PaneId::Terminal(pane_id), cwd);
+            let Some(panes) = manifest.panes.get(&tab_index) else {
+                continue;
+            };
+            let chosen = panes
+                .iter()
+                .filter(|p| !p.is_plugin)
+                .find(|p| p.is_focused)
+                .or_else(|| panes.iter().find(|p| !p.is_plugin));
+            if let Some(pane) = chosen {
+                self.effects.push(Effect::QueryPaneCwd { pane_id: pane.id });
             }
         }
     }
@@ -551,6 +576,12 @@ mod tests {
         PaneManifest { panes }
     }
 
+    fn manifest_with(entries: Vec<(usize, Vec<PaneInfo>)>) -> PaneManifest {
+        PaneManifest {
+            panes: entries.into_iter().collect(),
+        }
+    }
+
     fn cwd_event(pane_id: u32, path: &str) -> Event {
         Event::CwdChanged(
             PaneId::Terminal(pane_id),
@@ -653,10 +684,13 @@ mod tests {
         let effects = state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
         assert_eq!(
             effects,
-            vec![Effect::RenameTab {
-                tab_id: 1,
-                name: "api".to_string(),
-            }]
+            vec![
+                Effect::QueryPaneCwd { pane_id: 10 },
+                Effect::RenameTab {
+                    tab_id: 1,
+                    name: "api".to_string(),
+                },
+            ]
         );
     }
 
@@ -823,9 +857,116 @@ mod tests {
         assert_eq!(state.handle(cwd_event(99, "/ghost")), vec![]);
         // next manifest doesn't contain pane 99: the buffered cwd is dropped
         state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
-        // even when pane 99 later appears in a new tab, the stale cwd is gone
+        // when pane 99 later appears in a new tab, the ghost cwd must not name
+        // it — only a fresh discovery query is emitted
         state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
         let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[99])])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 99 }]);
+    }
+
+    #[test]
+    fn discovery_query_prefers_the_focused_pane() {
+        let mut state = State::default();
+        state.init(
+            BTreeMap::from([("git_detection".to_string(), "false".to_string())]),
+            "/home/u".to_string(),
+        );
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+
+        let panes = vec![
+            PaneInfo {
+                id: 10,
+                ..Default::default()
+            },
+            PaneInfo {
+                id: 11,
+                is_focused: true,
+                ..Default::default()
+            },
+        ];
+        let effects = state.handle(Event::PaneUpdate(manifest_with(vec![(0, panes)])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 11 }]);
+
+        // the adapter reinjects the answer as a synthetic CwdChanged
+        let effects = state.handle(cwd_event(11, "/proj"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "proj".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn restore_names_every_tab_from_its_panes() {
+        let mut state = State::default();
+        state.init(
+            BTreeMap::from([("git_detection".to_string(), "false".to_string())]),
+            "/home/u".to_string(),
+        );
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+
+        // a restored session arrives as one manifest with every pane at once
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[20])])));
+        assert_eq!(effects.len(), 2);
+        assert!(effects.contains(&Effect::QueryPaneCwd { pane_id: 10 }));
+        assert!(effects.contains(&Effect::QueryPaneCwd { pane_id: 20 }));
+
+        assert_eq!(
+            state.handle(cwd_event(10, "/proj/api")),
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "api".to_string(),
+            }]
+        );
+        assert_eq!(
+            state.handle(cwd_event(20, "/proj/web")),
+            vec![Effect::RenameTab {
+                tab_id: 2,
+                name: "web".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn discovery_response_flows_through_git_resolution() {
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true)]));
+
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 10 }]);
+
+        let effects = state.handle(cwd_event(10, "/repo/sub"));
+        assert_eq!(
+            effects,
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/repo/sub"),
+                context: ctx("/repo/sub"),
+            }]
+        );
+
+        let effects = state.handle(git_result(0, "/repo\n", "/repo/sub"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "repo".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn no_second_discovery_once_the_tab_is_named() {
+        let mut state = ready_state(&[("git_detection", "false")]);
+        state.handle(cwd_event(10, "/proj"));
+
+        // a split opens a new pane in the already-named tab: no query
+        let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
         assert_eq!(effects, vec![]);
     }
 }
