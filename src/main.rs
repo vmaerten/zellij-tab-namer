@@ -76,6 +76,10 @@ struct State {
     /// Paths known to NOT be in a git repo. Never invalidated: a `git init` in
     /// an already-visited path goes unnoticed until the session restarts.
     not_git: HashSet<String>,
+    /// Queried cwd → its git root, for cwds (symlinks, case differences) whose
+    /// git root is not one of their string ancestors. Never invalidated, like
+    /// not_git.
+    root_aliases: HashMap<String, String>,
     /// CwdChanged events for pane_ids not yet in pane_to_tab — latest event per
     /// pane, kept in arrival order so replay stays deterministic
     pending_cwds: Vec<(u32, PathBuf)>,
@@ -286,6 +290,10 @@ impl State {
         self.tab_pane_counts.retain(|id, _| alive_ids.contains(id));
         self.tab_prefixes.retain(|id, _| alive_ids.contains(id));
         self.tab_suffixes.retain(|id, _| alive_ids.contains(id));
+        for waiters in self.pending_git.values_mut() {
+            waiters.retain(|id| alive_ids.contains(id));
+        }
+        self.pending_git.retain(|_, waiters| !waiters.is_empty());
 
         self.index_to_id.clear();
         self.floating_visible.clear();
@@ -385,15 +393,16 @@ impl State {
     }
 
     /// Pick the pane whose cwd names the tab: the focused pane of the visible
-    /// layer (is_focused is per-layer), then any focused pane, then the first
-    /// candidate of the visible layer, then any candidate.
+    /// layer (is_focused is per-layer), then any candidate of the visible
+    /// layer, then any focused pane, then any candidate — what the user sees
+    /// beats a focus hidden in the other layer.
     fn choose_discovery_pane(&self, tab_id: usize, panes: &[PaneInfo]) -> Option<u32> {
         let want_floating = self.floating_visible.contains(&tab_id);
         let candidates = || panes.iter().filter(|p| !p.is_plugin && !p.is_suppressed);
         candidates()
             .find(|p| p.is_focused && p.is_floating == want_floating)
-            .or_else(|| candidates().find(|p| p.is_focused))
             .or_else(|| candidates().find(|p| p.is_floating == want_floating))
+            .or_else(|| candidates().find(|p| p.is_focused))
             .or_else(|| candidates().next())
             .map(|p| p.id)
     }
@@ -441,6 +450,9 @@ impl State {
 
     /// Walk path ancestors and return the git root's basename if one is known.
     fn find_git_root(&self, cwd: &str) -> Option<String> {
+        if let Some(git_root) = self.root_aliases.get(cwd) {
+            return Some(basename(git_root));
+        }
         Path::new(cwd)
             .ancestors()
             .filter_map(Path::to_str)
@@ -478,6 +490,13 @@ impl State {
 
         match git_root {
             Some(git_root) => {
+                let is_ancestor = Path::new(cwd)
+                    .ancestors()
+                    .filter_map(Path::to_str)
+                    .any(|p| p == git_root);
+                if !is_ancestor {
+                    self.root_aliases.insert(cwd.clone(), git_root.clone());
+                }
                 self.git_roots.insert(git_root);
             }
             None => {
@@ -1118,5 +1137,82 @@ mod tests {
         // a split opens a new pane in the already-named tab: no query
         let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10, 11])])));
         assert_eq!(effects, vec![]);
+    }
+
+    #[test]
+    fn visible_layer_beats_focus_of_hidden_layer() {
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        let mut floating_tab = tab(1, 0, true);
+        floating_tab.are_floating_panes_visible = true;
+        state.handle(Event::TabUpdate(vec![floating_tab]));
+
+        // the tiled pane is focused in its (hidden) layer; the visible
+        // floating pane is not focused — what the user sees must win
+        let panes = vec![
+            PaneInfo {
+                id: 10,
+                is_focused: true,
+                ..Default::default()
+            },
+            PaneInfo {
+                id: 11,
+                is_floating: true,
+                ..Default::default()
+            },
+        ];
+        let effects = state.handle(Event::PaneUpdate(manifest_with(vec![(0, panes)])));
+        assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 11 }]);
+    }
+
+    #[test]
+    fn dead_tab_waiters_are_purged() {
+        let mut state = ready_state(&[]);
+        state.handle(cwd_event(10, "/repo"));
+        assert!(!state.pending_git.is_empty());
+
+        // the waiting tab closes before the git result arrives
+        state.handle(Event::TabUpdate(vec![tab(2, 0, true)]));
+        assert!(state.pending_git.is_empty());
+
+        // the late result still feeds the caches, without effects
+        assert_eq!(state.handle(git_result(0, "/repo\n", "/repo")), vec![]);
+        assert!(state.git_roots.contains("/repo"));
+    }
+
+    #[test]
+    fn symlinked_cwd_resolves_via_root_alias() {
+        let mut state = ready_state(&[]);
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[20])])));
+
+        // the cwd goes through a symlink: git resolves it to another path
+        assert_eq!(
+            state.handle(cwd_event(10, "/links/repo/sub")),
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/links/repo/sub"),
+                context: ctx("/links/repo/sub"),
+            }]
+        );
+        let effects = state.handle(git_result(0, "/real/repo\n", "/links/repo/sub"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 1,
+                name: "repo".to_string(),
+            }]
+        );
+
+        // a second tab on the same symlinked cwd resolves from the cache,
+        // without launching another git query
+        let effects = state.handle(cwd_event(20, "/links/repo/sub"));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 2,
+                name: "repo".to_string(),
+            }]
+        );
     }
 }
