@@ -1,2 +1,2 @@
-[build]
-target = "wasm32-wasip1"
+[alias]
+wasm = "build --release --target wasm32-wasip1"

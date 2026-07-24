@@ -2,6 +2,11 @@
 name = "zellij-tab-namer"
 version = "0.1.0"
 edition = "2021"
+description = "A Zellij plugin that names tabs after the git repo or folder their panes are in, with a decoration pipe API."
+license = "MIT"
+repository = "https://github.com/vmaerten/zellij-tab-namer"
+keywords = ["zellij", "plugin", "wasm", "git", "tabs"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 zellij-tile = "0.44"
