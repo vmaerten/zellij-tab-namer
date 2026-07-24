@@ -197,6 +197,8 @@ impl State {
         let mut permissions = vec![
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            // Covers `unblock_cli_pipe_input`.
+            PermissionType::ReadCliPipes,
         ];
         let mut events = vec![
             EventType::TabUpdate,
@@ -752,6 +754,7 @@ mod tests {
                 Effect::RequestPermissions(vec![
                     PermissionType::ReadApplicationState,
                     PermissionType::ChangeApplicationState,
+                    PermissionType::ReadCliPipes,
                     PermissionType::RunCommands,
                 ]),
                 Effect::Subscribe(vec![
@@ -772,6 +775,7 @@ mod tests {
             Effect::RequestPermissions(vec![
                 PermissionType::ReadApplicationState,
                 PermissionType::ChangeApplicationState,
+                PermissionType::ReadCliPipes,
             ])
         );
     }
@@ -1063,6 +1067,17 @@ mod tests {
             state.handle_pipe(message),
             vec![Effect::UnblockCliPipe("pipe-1".to_string())]
         );
+
+        let mut fresh = State::default();
+        match fresh.init(BTreeMap::new(), String::new()).first() {
+            Some(Effect::RequestPermissions(perms)) => {
+                assert!(
+                    perms.contains(&PermissionType::ReadCliPipes),
+                    "unblocking needs ReadCliPipes, requested {perms:?}"
+                );
+            }
+            other => panic!("init must request permissions first, got {other:?}"),
+        }
     }
 
     #[test]
