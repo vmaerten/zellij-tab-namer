@@ -35,7 +35,7 @@ _Avoid_: toplevel, repo root
 A tab awaiting the git verdict for a cwd whose query is in flight. Every waiter on the same cwd is renamed when the verdict lands.
 
 **Discovery query**:
-The cwd lookup issued for a newly discovered pane whose tab has no base name yet — how tabs get named at session start, tab creation and restore, without waiting for a `cd`. The tab's focused pane speaks for it; failing that, its first terminal pane.
+The cwd lookup issued for a newly discovered pane whose tab has no base name yet — how tabs get named at session start, tab creation and restore, without waiting for a `cd`. The focused pane of the tab's visible layer speaks for it, with fallbacks to another pane of that layer, then any focused pane, then any terminal pane.
 _Avoid_: poll, probe
 
 ### Architecture

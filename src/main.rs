@@ -8,6 +8,12 @@ use zellij_tile::prelude::*;
 
 const CTX_CWD: &str = "cwd";
 
+/// Upper bound on the total entries across the never-invalidated git caches
+/// (`git_roots` / `not_git` / `root_aliases` / `resolved_cwds`). Crossing it
+/// clears them — a cleared entry just costs one cheap async re-query. Keeps
+/// memory bounded without a timer, matching the plugin's event-driven model.
+const MAX_GIT_CACHE_ENTRIES: usize = 4096;
+
 /// Everything the plugin can do to the world. The core only emits these;
 /// `drive` in the ZellijPlugin adapter is the sole place they are executed.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +86,12 @@ struct State {
     /// git root is not one of their string ancestors. Never invalidated, like
     /// not_git.
     root_aliases: HashMap<String, String>,
+    /// Cwds whose git toplevel has actually been resolved by a query. Only then
+    /// is the `find_git_root` ancestor walk trustworthy: an unqueried cwd could
+    /// sit in a *deeper* repo nested under a known ancestor root, and matching
+    /// the ancestor would name it wrongly (and permanently). Never invalidated,
+    /// like not_git.
+    resolved_cwds: HashSet<String>,
     /// CwdChanged events for pane_ids not yet in pane_to_tab — latest event per
     /// pane, kept in arrival order so replay stays deterministic
     pending_cwds: Vec<(u32, PathBuf)>,
@@ -460,17 +472,39 @@ impl State {
             .map(basename)
     }
 
-    /// Name the tab from the git caches; false if its cwd is in neither cache yet.
+    /// Name the tab from the git caches; false if its cwd isn't resolved yet.
     fn apply_cached_name(&mut self, tab_id: usize, cwd: &str) -> bool {
-        let name = if let Some(repo_name) = self.find_git_root(cwd) {
-            repo_name
-        } else if self.not_git.contains(cwd) {
+        let name = if self.not_git.contains(cwd) {
             self.derive_name(cwd)
+        } else if self.can_trust_git_root(cwd) {
+            match self.find_git_root(cwd) {
+                Some(repo_name) => repo_name,
+                None => return false,
+            }
         } else {
             return false;
         };
         self.apply_name(tab_id, name);
         true
+    }
+
+    /// Whether `find_git_root`'s ancestor walk can be trusted for this cwd — i.e.
+    /// it won't miss a nested repo. True only for an exact hit (the cwd is itself
+    /// a known root or alias) or a cwd git has already resolved: for anything
+    /// else a `git rev-parse` must run, in case the cwd's real toplevel is a repo
+    /// nested below a known ancestor root.
+    fn can_trust_git_root(&self, cwd: &str) -> bool {
+        self.git_roots.contains(cwd)
+            || self.root_aliases.contains_key(cwd)
+            || self.resolved_cwds.contains(cwd)
+    }
+
+    /// Total entries across the never-invalidated git caches (for the cap).
+    fn git_cache_len(&self) -> usize {
+        self.git_roots.len()
+            + self.not_git.len()
+            + self.root_aliases.len()
+            + self.resolved_cwds.len()
     }
 
     fn on_run_command_result(
@@ -483,6 +517,15 @@ impl State {
             return;
         };
         let waiters = self.pending_git.remove(cwd).unwrap_or_default();
+
+        // Bound the never-invalidated git caches (event-driven, no timer). Done
+        // before inserting this result so the fresh entry always survives.
+        if self.git_cache_len() >= MAX_GIT_CACHE_ENTRIES {
+            self.git_roots.clear();
+            self.not_git.clear();
+            self.root_aliases.clear();
+            self.resolved_cwds.clear();
+        }
 
         let git_root = (exit_code == Some(0))
             .then(|| String::from_utf8_lossy(&stdout).trim().to_string())
@@ -498,6 +541,9 @@ impl State {
                     self.root_aliases.insert(cwd.clone(), git_root.clone());
                 }
                 self.git_roots.insert(git_root);
+                // The ancestor walk is now trustworthy for this exact cwd: its
+                // true (possibly deeper) toplevel is the nearest cached root.
+                self.resolved_cwds.insert(cwd.clone());
             }
             None => {
                 self.not_git.insert(cwd.clone());
@@ -1213,6 +1259,61 @@ mod tests {
                 tab_id: 2,
                 name: "repo".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn nested_repo_is_not_named_after_an_ancestor_root() {
+        let mut state = State::default();
+        state.init(BTreeMap::new(), "/home/u".to_string());
+        state.handle(Event::PermissionRequestResult(PermissionStatus::Granted));
+        state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
+        state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[20])])));
+
+        // Tab 1 makes the git-tracked home a known root.
+        state.handle(cwd_event(10, "/home/u"));
+        state.handle(git_result(0, "/home/u\n", "/home/u"));
+
+        // Tab 2 enters a repo nested UNDER that root. It must query git for its
+        // own toplevel, not silently inherit the ancestor's name ("u").
+        assert_eq!(
+            state.handle(cwd_event(20, "/home/u/dev/realproject")),
+            vec![Effect::RunGit {
+                cwd: PathBuf::from("/home/u/dev/realproject"),
+                context: ctx("/home/u/dev/realproject"),
+            }],
+            "a nested cwd must be queried, not named after an ancestor root"
+        );
+
+        // git reports the deeper toplevel → the tab is named after it.
+        let effects = state.handle(git_result(
+            0,
+            "/home/u/dev/realproject\n",
+            "/home/u/dev/realproject",
+        ));
+        assert_eq!(
+            effects,
+            vec![Effect::RenameTab {
+                tab_id: 2,
+                name: "realproject".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn git_caches_stay_bounded() {
+        let mut state = ready_state(&[]);
+        // Visit far more distinct cwds than the cap; the caches must not grow
+        // without bound (they clear and rebuild, event-driven, no timer).
+        for i in 0..(MAX_GIT_CACHE_ENTRIES + 50) {
+            let cwd = format!("/p/dir{i}");
+            state.handle(cwd_event(10, &cwd));
+            state.handle(git_result(0, &format!("{cwd}\n"), &cwd));
+        }
+        assert!(
+            state.git_cache_len() <= MAX_GIT_CACHE_ENTRIES,
+            "git caches must stay bounded, got {}",
+            state.git_cache_len()
         );
     }
 }
