@@ -1,0 +1,53 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    // One PR for every minor/patch update, whatever the manager.
+    'group:allNonMajor',
+    ':semanticCommits',
+    // Dependency bumps are chores, never feat/fix — they must not drive the
+    // version or show up as user-facing changes in the release notes.
+    ':semanticCommitTypeAll(chore)',
+  ],
+
+  timezone: 'Europe/Paris',
+  schedule: ['before 9am on monday'],
+  labels: ['dependencies'],
+  prConcurrentLimit: 3,
+
+  // The crate declares `zellij-tile = "0.44"`, so patch releases never change
+  // Cargo.toml — only Cargo.lock. Without this, Renovate would raise nothing
+  // and the lock would silently rot (it sat on 0.44.0 while 0.44.3 was out,
+  // and the release notes derive the advertised Zellij floor from the lock).
+  // `update-lockfile` refreshes the lock for in-range updates and falls back to
+  // editing the range only when the new version doesn't satisfy it.
+  rangeStrategy: 'update-lockfile',
+
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ['before 9am on the first day of the month'],
+  },
+
+  packageRules: [
+    // Comes after group:allNonMajor, so it wins on zellij-tile.
+    //
+    // zellij-tile is the compatibility contract with the Zellij host, not an
+    // ordinary dependency: it defines the plugin ABI. Cargo treats a 0.x minor
+    // as breaking, so 0.44 -> 0.45 can stop the plugin from loading. It stays
+    // out of the grouped PR and gets its own, reviewed one — merging it means
+    // updating the stated Zellij floor in the README.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['zellij-tile'],
+      groupName: null,
+      separateMinorPatch: true,
+      addLabels: ['compatibility'],
+      prBodyNotes: [
+        '⚠️ `zellij-tile` pins the plugin ABI. Before merging a minor bump: rebuild against the matching Zellij, update the version floor in the README, and re-test in a live session.',
+      ],
+    },
+  ],
+
+  // No automerge on purpose: CI proves the plugin builds and the tests pass,
+  // but nothing here proves it still works against a running Zellij host.
+}

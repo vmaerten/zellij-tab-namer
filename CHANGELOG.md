@@ -13,6 +13,10 @@ Generated from the conventional commits by [git-cliff](https://git-cliff.org).
 - Don't name nested repos after an ancestor root; bound caches
 - Request ReadCliPipes to cover pipe unblocking (#5)
 
+### Build & CI
+
+- Release tooling — CI, release workflow, changelog and README fixes (#6)
+
 ### Documentation
 
 - Add README, LICENSE, and package metadata for publishing
