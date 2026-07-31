@@ -16,6 +16,8 @@ Generated from the conventional commits by [git-cliff](https://git-cliff.org).
 ### Build & CI
 
 - Release tooling — CI, release workflow, changelog and README fixes (#6)
+- Configure Renovate (#7)
+- Drop Renovate lock file maintenance (#9)
 
 ### Documentation
 
