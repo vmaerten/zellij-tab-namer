@@ -2,11 +2,9 @@
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
     'config:recommended',
-    // One PR for every minor/patch update, whatever the manager.
     'group:allNonMajor',
     ':semanticCommits',
-    // Dependency bumps are chores, never feat/fix — they must not drive the
-    // version or show up as user-facing changes in the release notes.
+    // cliff.toml skips chore(deps), keeping bumps out of the release notes.
     ':semanticCommitTypeAll(chore)',
   ],
 
@@ -15,27 +13,13 @@
   labels: ['dependencies'],
   prConcurrentLimit: 3,
 
-  // The crate declares `zellij-tile = "0.44"`, so patch releases never change
-  // Cargo.toml — only Cargo.lock. Without this, Renovate would raise nothing
-  // and the lock would silently rot (it sat on 0.44.0 while 0.44.3 was out,
-  // and the release notes derive the advertised Zellij floor from the lock).
-  // `update-lockfile` refreshes the lock for in-range updates and falls back to
-  // editing the range only when the new version doesn't satisfy it.
+  // `zellij-tile = "0.44"` means patch releases only move Cargo.lock — and the
+  // release notes read the advertised Zellij floor from that lock.
   rangeStrategy: 'update-lockfile',
 
-  lockFileMaintenance: {
-    enabled: true,
-    schedule: ['before 9am on the first day of the month'],
-  },
-
+  // Resolved after the presets, so this un-groups zellij-tile: it pins the
+  // plugin ABI, and Cargo treats a 0.x minor as breaking.
   packageRules: [
-    // Comes after group:allNonMajor, so it wins on zellij-tile.
-    //
-    // zellij-tile is the compatibility contract with the Zellij host, not an
-    // ordinary dependency: it defines the plugin ABI. Cargo treats a 0.x minor
-    // as breaking, so 0.44 -> 0.45 can stop the plugin from loading. It stays
-    // out of the grouped PR and gets its own, reviewed one — merging it means
-    // updating the stated Zellij floor in the README.
     {
       matchManagers: ['cargo'],
       matchPackageNames: ['zellij-tile'],
@@ -43,11 +27,10 @@
       separateMinorPatch: true,
       addLabels: ['compatibility'],
       prBodyNotes: [
-        '⚠️ `zellij-tile` pins the plugin ABI. Before merging a minor bump: rebuild against the matching Zellij, update the version floor in the README, and re-test in a live session.',
+        '⚠️ `zellij-tile` pins the plugin ABI. Rebuild against the matching Zellij and update the version floor in the README before merging a minor bump.',
       ],
     },
   ],
 
-  // No automerge on purpose: CI proves the plugin builds and the tests pass,
-  // but nothing here proves it still works against a running Zellij host.
+  // No automerge: CI proves it builds, not that it still loads in Zellij.
 }
