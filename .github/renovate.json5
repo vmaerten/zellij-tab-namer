@@ -2,6 +2,8 @@
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
     'config:recommended',
+    // One PR for every minor/patch update, whatever the manager.
+    'group:allNonMajor',
     ':semanticCommits',
     // Dependency bumps are chores, never feat/fix — they must not drive the
     // version or show up as user-facing changes in the release notes.
@@ -27,17 +29,13 @@
   },
 
   packageRules: [
-    {
-      matchUpdateTypes: ['minor', 'patch', 'digest'],
-      groupName: 'all non-major dependencies',
-      groupSlug: 'all-minor-patch',
-    },
-
+    // Comes after group:allNonMajor, so it wins on zellij-tile.
+    //
     // zellij-tile is the compatibility contract with the Zellij host, not an
     // ordinary dependency: it defines the plugin ABI. Cargo treats a 0.x minor
     // as breaking, so 0.44 -> 0.45 can stop the plugin from loading. It stays
     // out of the grouped PR and gets its own, reviewed one — merging it means
-    // updating the floor in the README and adding a row to the matrix.
+    // updating the stated Zellij floor in the README.
     {
       matchManagers: ['cargo'],
       matchPackageNames: ['zellij-tile'],
