@@ -1,0 +1,5 @@
+# go-task config (https://taskfile.dev/reference/config).
+# Enable native interactive prompts for missing required vars: `task bump` /
+# `task release` ask for NEW when it isn't passed on the CLI. Automatically
+# skipped in non-TTY / CI environments (the task cancels instead of hanging).
+interactive: true
