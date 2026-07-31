@@ -7,9 +7,10 @@ prefix or suffix (a status symbol, a badge) *around* that name — without ever 
 for it.
 
 <p align="center">
+  <a href="https://github.com/vmaerten/zellij-tab-namer/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/vmaerten/zellij-tab-namer/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Zellij plugin" src="https://img.shields.io/badge/zellij-plugin-8A2BE2">
   <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-000000?logo=rust">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-21%20passing-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-23%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
@@ -35,8 +36,8 @@ tab's active pane and renames the tab after where it actually is:
 It names tabs **at session start, on new tabs, and on restore** — not only after you `cd` — so a
 freshly opened session is already labelled. And it exposes a **decoration Pipe API** (`set_prefix` /
 `set_suffix` / `clear_*`) so other tools can wrap a symbol around the name.
-[`claude-tab-indicator`](https://github.com/vmaerten/claude-tab-indicator) uses it to show live
-Claude Code activity (`⚡ myrepo`).
+[`zellij-agent-activity`](https://github.com/vmaerten/zellij-agent-activity) uses it to show live
+AI coding agent activity (`⚡ myrepo`).
 
 ## Highlights
 
@@ -48,7 +49,7 @@ Claude Code activity (`⚡ myrepo`).
 - **Optional pane-count suffix** — e.g. `myrepo (3)` when a tab holds several panes.
 - **Correct under churn** — handles symlinked cwds, tabs opened/closed/moved, and out-of-order
   Zellij events; de-duplicates in-flight `git` queries.
-- **Pure, tested core** — the naming logic is a host-free state machine with 21 native unit tests
+- **Pure, tested core** — the naming logic is a host-free state machine with 23 native unit tests
   (see [Architecture](#architecture)).
 
 ## Requirements
@@ -60,10 +61,13 @@ Claude Code activity (`⚡ myrepo`).
 ## Install
 
 ```sh
-rustup target add wasm32-wasip1
-cargo wasm   # -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
-cp target/wasm32-wasip1/release/zellij-tab-namer.wasm ~/.config/zellij/plugins/
+# Download the wasm from the latest release into your plugins dir
+curl -L -o ~/.config/zellij/plugins/zellij-tab-namer.wasm \
+  https://github.com/vmaerten/zellij-tab-namer/releases/latest/download/zellij-tab-namer.wasm
 ```
+
+> Prefer building from source? See [Development](#development) — `cargo wasm` produces the same
+> `zellij-tab-namer.wasm`; drop it into `~/.config/zellij/plugins/`.
 
 Load it in `~/.config/zellij/config.kdl`:
 
@@ -158,8 +162,15 @@ ordinary `cargo test` unit tests instead of in a live session.
 ## Development
 
 ```sh
-cargo test    # pure core, host-native, no zellij needed (21 tests)
+cargo test    # pure core, host-native, no zellij needed (23 tests)
 cargo wasm    # release build -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
+```
+
+With [`go-task`](https://taskfile.dev) and [`mise`](https://mise.jdx.dev) installed:
+
+```sh
+task ci       # exactly what CI runs: fmt, clippy, test, wasm build
+task release NEW=0.2.0   # bump, changelog, CI, commit, tag and push
 ```
 
 ## License

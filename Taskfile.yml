@@ -1,0 +1,93 @@
+version: '3'
+
+vars:
+  CURRENT:
+    sh: grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2
+  WASM: target/wasm32-wasip1/release/zellij-tab-namer.wasm
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  version:
+    desc: Print the current Cargo.toml version.
+    cmds:
+      - echo {{.CURRENT}}
+    silent: true
+
+  wasm:
+    desc: Build the release wasm plugin.
+    cmds:
+      - cargo build --release --target wasm32-wasip1
+      - 'echo "-> {{.WASM}}"'
+
+  ci:
+    desc: Run the exact checks CI runs (fmt, clippy, test, wasm build).
+    cmds:
+      - cargo fmt --all --check
+      - cargo clippy --all-targets -- -D warnings
+      - cargo test
+      - cargo build --release --target wasm32-wasip1
+
+  bump:
+    desc: 'Set the version in Cargo.toml. Prompts for NEW if omitted. Usage: task bump [NEW=0.2.0]'
+    requires:
+      vars:
+        - name: NEW
+    preconditions:
+      - sh: 'echo "{{.NEW}}" | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+$"'
+        msg: 'NEW must be semver X.Y.Z (got "{{.NEW}}")'
+    cmds:
+      - perl -i -pe 's/^version = ".*"/version = "{{.NEW}}"/' Cargo.toml
+      - cargo update --workspace --quiet
+      - 'echo "bumped -> {{.NEW}}"'
+
+  changelog:
+    desc: 'Regenerate CHANGELOG.md for a version. Prompts for NEW if omitted. Usage: task changelog [NEW=0.2.0]'
+    requires:
+      vars:
+        - name: NEW
+    preconditions:
+      - sh: 'command -v mise >/dev/null'
+        msg: "mise is required (https://mise.jdx.dev) — it pins git-cliff for this repo; then run 'mise install'."
+    cmds:
+      - mise exec -- git-cliff --tag v{{.NEW}} -o CHANGELOG.md
+      - 'echo "CHANGELOG.md regenerated for v{{.NEW}}"'
+
+  release-notes:
+    desc: 'Preview the GitHub Release body. Usage: task release-notes [TAG=v0.2.0]'
+    vars:
+      TAG: '{{.TAG | default (printf "v%s" .CURRENT)}}'
+    cmds:
+      - ./scripts/release-notes.sh {{.TAG}}
+    silent: true
+
+  release:
+    desc: 'Bump, changelog, CI, commit, tag and push. Prompts for NEW if omitted. Usage: task release [NEW=0.2.0]'
+    requires:
+      vars:
+        - name: NEW
+    preconditions:
+      - sh: 'echo "{{.NEW}}" | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+$"'
+        msg: 'NEW must be semver X.Y.Z (got "{{.NEW}}")'
+      - sh: 'test -z "$(git status --porcelain)"'
+        msg: 'Working tree is dirty — commit or stash first.'
+      - sh: '! git rev-parse -q --verify "refs/tags/v{{.NEW}}" >/dev/null'
+        msg: 'Tag v{{.NEW}} already exists.'
+    prompt: 'Release v{{.NEW}} — bump, run CI, commit, tag and push to origin?'
+    cmds:
+      - task: bump
+        vars: { NEW: '{{.NEW}}' }
+      - task: changelog
+        vars: { NEW: '{{.NEW}}' }
+      - task: release-notes
+        vars: { TAG: 'v{{.NEW}}' }
+      - task: ci
+      - git add Cargo.toml Cargo.lock CHANGELOG.md
+      - "git commit -m 'chore: release v{{.NEW}}'"
+      - git tag v{{.NEW}}
+      - git push origin HEAD
+      - git push origin v{{.NEW}}
+      - 'echo "released v{{.NEW}} — Release workflow will build & publish the wasm."'

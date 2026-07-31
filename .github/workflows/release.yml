@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM: target/wasm32-wasip1/release/zellij-tab-namer.wasm
+
+jobs:
+  release:
+    name: Build wasm · publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (bundles the cargo cache)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ""
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | grep -o '"version":"[^"]*"' | head -n1 | cut -d'"' -f4)"
+          echo "tag=$tag  Cargo.toml=$manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::Tag v$tag does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+
+      - name: Build wasm
+        run: cargo build --release --target wasm32-wasip1
+
+      - name: Assemble release notes
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          if ! scripts/release-notes.sh "$GITHUB_REF_NAME" > RELEASE_NOTES.md; then
+            echo "::error::could not assemble the release notes (see the log above)"
+            exit 1
+          fi
+          echo "--- release notes ---"
+          cat RELEASE_NOTES.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ env.WASM }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
