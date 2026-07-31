@@ -47,6 +47,12 @@ replace = ""
 message = "^chore\\(release\\)|^chore: release"
 skip = true
 
+# Renovate raises these; a dependency bump is not a user-facing change, and the
+# release notes are generated from this changelog.
+[[git.commit_parsers]]
+message = "^chore\\(deps\\)"
+skip = true
+
 [[git.commit_parsers]]
 message = "^feat"
 group = "Features"
