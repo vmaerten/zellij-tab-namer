@@ -1,0 +1,27 @@
+// Four tabs, four places: the home directory, a checkout of this repo, a plain
+// folder, and a pane deep inside another repo — `code/dotfiles/nvim`, which
+// should still read `dotfiles`, the repo winning over the folder before anything
+// is typed. Deliberately unnamed: the plugin is what names them, so a `name=`
+// here would be the layout stealing the demo. `zellij:tab-bar` is the built-in,
+// so this needs no plugin alias to resolve.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+    }
+
+    tab {
+        pane cwd="@HOME@"
+    }
+    tab focus=true {
+        pane cwd="@HOME@/code/zellij-tab-namer"
+    }
+    tab {
+        pane cwd="@HOME@/Documents"
+    }
+    tab {
+        pane cwd="@HOME@/code/dotfiles/nvim"
+    }
+}

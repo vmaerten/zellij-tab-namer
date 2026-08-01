@@ -13,7 +13,9 @@ without fighting the plugin over it.
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
-<!-- Drop a screenshot here: docs/media/demo.png -->
+<p align="center">
+  <img alt="Four tabs named after the home directory, two git repos and a plain folder; a cd deeper into a repo leaves the name alone, a cd out of it hands the name back to the folder" src="docs/media/demo.gif" width="100%">
+</p>
 
 ## What is it?
 
@@ -79,6 +81,10 @@ load_plugins {
 | `pane_count` | *(unset)* | A format string appended when a tab holds more than one pane. `{pane_count}` is replaced with the count. Unset means no suffix. |
 
 ## Decoration pipe API
+
+<p align="center">
+  <img alt="A prefix set through the pipe API survives a cd, and a pane split adds a count suffix without disturbing it" src="docs/media/demo-pipe.gif" width="100%">
+</p>
 
 Another tool decorates a tab by sending a pipe message. The rendered tab name is always put together
 the same way:

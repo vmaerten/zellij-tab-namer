@@ -1,0 +1,16 @@
+# Prompt for the demo panes. Checked in so the recording doesn't depend on
+# whatever starship defaults ship that month, and kept to one line so the
+# commands stay close together on screen.
+add_newline = false
+format = "$directory$git_branch$git_status$rust$character"
+
+[directory]
+truncation_length = 2
+style = "blue"
+
+[character]
+success_symbol = "[❯](purple)"
+error_symbol = "[❯](red)"
+
+[rust]
+format = "[$symbol($version )]($style)"
