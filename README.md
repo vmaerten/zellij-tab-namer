@@ -148,8 +148,8 @@ Since the host functions only exist on wasm, the linker enforces the split: a ho
 into the core breaks the native build. That is what makes the timing-sensitive naming logic testable
 with a plain `cargo test` rather than in a live session, and there are 23 of those tests.
 
-- [`CONTEXT.md`](CONTEXT.md) covers the vocabulary: base name against rendered name, decoration,
-  waiter, discovery query.
+- [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,
+  decoration, waiter, discovery query.
 - [`docs/adr/`](docs/adr) holds the architecture decision records.
 
 ## Development
