@@ -1,8 +1,8 @@
 # zellij-tab-namer
 
-A [Zellij](https://zellij.dev) plugin that names each tab after the git repository (or the folder)
-its panes are in, and keeps that name up to date as you `cd` around. Instead of `Tab #1` and
-`Tab #2`, your tabs read `myrepo`, `dotfiles`, `~`.
+A [Zellij](https://zellij.dev) plugin that names each tab after the folder its panes are in, or
+after the git repository when that folder sits inside one, and keeps that name up to date as you
+`cd` around. Instead of `Tab #1` and `Tab #2`, your tabs read `Downloads`, `myrepo`, `~`.
 
 It also exposes a small pipe API, so another tool can put a prefix or a suffix around that name
 without fighting the plugin over it.
@@ -10,18 +10,7 @@ without fighting the plugin over it.
 <p align="center">
   <a href="https://github.com/vmaerten/zellij-tab-namer/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/vmaerten/zellij-tab-namer/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Zellij plugin" src="https://img.shields.io/badge/zellij-plugin-8A2BE2">
-  <img alt="Built with Rust" src="https://img.shields.io/badge/built%20with-Rust-000000?logo=rust">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-23%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
-</p>
-
-<p align="center">
-  <a href="#what-is-it">What is it?</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#configuration">Configuration</a> ·
-  <a href="#decoration-pipe-api">Decoration pipe API</a> ·
-  <a href="#how-naming-works">How naming works</a> ·
-  <a href="#architecture">Architecture</a>
 </p>
 
 <!-- Drop a screenshot here: docs/media/demo.png -->
@@ -31,9 +20,9 @@ without fighting the plugin over it.
 Past three or four tabs, the default `Tab #N` names stop telling you anything. This plugin watches
 the pane that speaks for each tab and renames the tab after where that pane actually is:
 
-- inside a git repo, the repo name (`myrepo`)
-- otherwise, the folder name (`Downloads`)
-- in your home directory, `~`
+- the folder it sits in (`Downloads`)
+- the repository name instead, when that folder is inside a git repo (`myrepo`)
+- `~` when it's your home directory
 
 Naming doesn't wait for a `cd`. It happens at session start, when you open a tab and when a layout
 is restored, so a session is already labelled by the time you look at it.
@@ -47,8 +36,8 @@ AI coding agent is up to, as `⚡ myrepo`.
 ## Requirements
 
 - Zellij 0.44.3 or later (`zellij --version`).
-- `git` on your `PATH`. This one is optional: without it, tabs fall back to folder names, and you
-  can set `git_detection false` to skip git entirely.
+- `git` on your `PATH`, only if you want repository names. Without it, tabs stay on folder names,
+  and `git_detection false` skips git entirely.
 
 ## Install
 
@@ -125,9 +114,10 @@ zellij pipe --name clear_all --args "tab_id=3"
 ## How naming works
 
 A tab's base name comes from the cwd of the pane that speaks for it, normally the focused pane of
-the visible layer, with fallbacks when there isn't one. From that cwd the plugin takes the git
-repository's top-level folder name, or failing that the directory's own name, or `~` when it is
-`$HOME`.
+the visible layer, with fallbacks when there isn't one. From that cwd the plugin takes the
+directory's own name, or `~` when it is `$HOME`. When the directory turns out to be inside a git
+repository, the repository's top-level folder name wins instead, since that is nearly always the
+name you have in mind.
 
 To name a tab before any `cd` happens, the plugin issues a one-shot discovery query for its cwd at
 session start, on new tabs and on restore. After that it follows `cd` through Zellij's `CwdChanged`
@@ -138,33 +128,23 @@ One limitation is deliberate: running `git init` in a folder the session has alr
 unnoticed until the session restarts, because the "not a repo" verdict is cached and never
 invalidated. The ADRs cover why.
 
-## Architecture
+## Development
 
-The plugin comes in two halves. The core (`init`, `handle`, `handle_pipe`) takes Zellij events and
-returns a `Vec<Effect>`, never calling the host itself. The adapter, gated behind
-`#[cfg(target_arch = "wasm32")]`, is the only place where those effects reach Zellij.
+```sh
+cargo test    # the pure core, no zellij needed
+cargo wasm    # release build -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
+task ci       # what CI runs: fmt, clippy, test, wasm build (needs go-task)
+```
 
-Since the host functions only exist on wasm, the linker enforces the split: a host call that creeps
-into the core breaks the native build. That is what makes the timing-sensitive naming logic testable
-with a plain `cargo test` rather than in a live session, and there are 23 of those tests.
+The plugin is a pure core that turns Zellij events into a `Vec<Effect>`, plus a thin wasm-gated
+adapter that runs those effects against the host. Since the host functions only exist on wasm, the
+linker enforces the split, which is what makes the timing-sensitive naming logic testable with a
+plain `cargo test` rather than in a live session. See
+[ADR-0001](docs/adr/0001-effects-seam-with-wasm-gated-adapter.md).
 
 - [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,
   decoration, waiter, discovery query.
 - [`docs/adr/`](docs/adr) holds the architecture decision records.
-
-## Development
-
-```sh
-cargo test    # the pure core, no zellij needed (23 tests)
-cargo wasm    # release build -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
-```
-
-If you have [`go-task`](https://taskfile.dev) and [`mise`](https://mise.jdx.dev):
-
-```sh
-task ci                  # what CI runs: fmt, clippy, test, wasm build
-task release NEW=0.2.0   # bump, changelog, CI, commit, tag and push
-```
 
 ## License
 
