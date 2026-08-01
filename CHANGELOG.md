@@ -8,12 +8,13 @@ except where writing one by hand said more.
 
 First release.
 
-Names each Zellij tab after the git repository, or the folder, its panes are in,
-and keeps that name current as you `cd` around.
+Names each Zellij tab after the folder its panes are in, or after the git
+repository when that folder sits inside one, and keeps that name current as you
+`cd` around.
 
 - Tabs are named at session start, on new tabs and on layout restore, not only
   after a `cd`.
-- Git repository name, else folder name, else `~` for `$HOME`.
+- Folder name, the repository name instead when there is one, `~` for `$HOME`.
 - `git_detection` can be turned off to always use the folder name and skip
   running `git` altogether.
 - Optional pane-count suffix, off by default.
