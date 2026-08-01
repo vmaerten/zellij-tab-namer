@@ -20,8 +20,7 @@ without fighting the plugin over it.
   <a href="#install">Install</a> ·
   <a href="#configuration">Configuration</a> ·
   <a href="#decoration-pipe-api">Decoration pipe API</a> ·
-  <a href="#how-naming-works">How naming works</a> ·
-  <a href="#architecture">Architecture</a>
+  <a href="#how-naming-works">How naming works</a>
 </p>
 
 <!-- Drop a screenshot here: docs/media/demo.png -->
@@ -138,33 +137,23 @@ One limitation is deliberate: running `git init` in a folder the session has alr
 unnoticed until the session restarts, because the "not a repo" verdict is cached and never
 invalidated. The ADRs cover why.
 
-## Architecture
-
-The plugin comes in two halves. The core (`init`, `handle`, `handle_pipe`) takes Zellij events and
-returns a `Vec<Effect>`, never calling the host itself. The adapter, gated behind
-`#[cfg(target_arch = "wasm32")]`, is the only place where those effects reach Zellij.
-
-Since the host functions only exist on wasm, the linker enforces the split: a host call that creeps
-into the core breaks the native build. That is what makes the timing-sensitive naming logic testable
-with a plain `cargo test` rather than in a live session, and there are 23 of those tests.
-
-- [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,
-  decoration, waiter, discovery query.
-- [`docs/adr/`](docs/adr) holds the architecture decision records.
-
 ## Development
 
 ```sh
 cargo test    # the pure core, no zellij needed (23 tests)
 cargo wasm    # release build -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
+task ci       # what CI runs: fmt, clippy, test, wasm build (needs go-task)
 ```
 
-If you have [`go-task`](https://taskfile.dev) and [`mise`](https://mise.jdx.dev):
+The plugin is a pure core that turns Zellij events into a `Vec<Effect>`, plus a thin wasm-gated
+adapter that runs those effects against the host. Since the host functions only exist on wasm, the
+linker enforces the split, which is what makes the timing-sensitive naming logic testable with a
+plain `cargo test` rather than in a live session. See
+[ADR-0001](docs/adr/0001-effects-seam-with-wasm-gated-adapter.md).
 
-```sh
-task ci                  # what CI runs: fmt, clippy, test, wasm build
-task release NEW=0.2.0   # bump, changelog, CI, commit, tag and push
-```
+- [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,
+  decoration, waiter, discovery query.
+- [`docs/adr/`](docs/adr) holds the architecture decision records.
 
 ## License
 
