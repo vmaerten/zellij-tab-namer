@@ -1,2 +1,6 @@
 target/
 .DS_Store
+
+# Kept locally, not published: it tracks my own next steps, not anything a
+# user of the plugin needs.
+/ROADMAP.md
