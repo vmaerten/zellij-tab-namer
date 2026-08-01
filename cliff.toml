@@ -2,8 +2,9 @@
 header = """
 # Changelog
 
-All notable changes to this project are documented in this file.
-Generated from the conventional commits by [git-cliff](https://git-cliff.org).\n
+All notable changes to this project are documented in this file. Entries are
+generated from the conventional commits by [git-cliff](https://git-cliff.org),
+except where writing one by hand said more.\n
 """
 
 body = """
@@ -13,7 +14,7 @@ body = """
 ## [Unreleased]
 {% endif -%}
 {% for group, commits in commits | group_by(attribute="group") %}
-### {{ group | upper_first }}
+### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
 - {{ commit.message | upper_first }}\
 {% endfor %}
@@ -53,38 +54,22 @@ skip = true
 message = "^chore\\(deps\\)"
 skip = true
 
+# Four sections, no more. The numeric prefix fixes their order (group_by sorts
+# alphabetically otherwise, which would lead with Bug Fixes); the template
+# strips it back out.
 [[git.commit_parsers]]
 message = "^feat"
-group = "Features"
+group = "<!-- 0 -->Features"
 
 [[git.commit_parsers]]
 message = "^fix"
-group = "Bug Fixes"
+group = "<!-- 1 -->Bug Fixes"
 
 [[git.commit_parsers]]
 message = "^perf"
-group = "Performance"
+group = "<!-- 2 -->Performance"
 
+# docs, refactor, ci, build, test, style, chore: internal work, one bucket.
 [[git.commit_parsers]]
-message = "^refactor"
-group = "Refactor"
-
-[[git.commit_parsers]]
-message = "^docs"
-group = "Documentation"
-
-[[git.commit_parsers]]
-message = "^test"
-group = "Testing"
-
-[[git.commit_parsers]]
-message = "^ci|^build"
-group = "Build & CI"
-
-[[git.commit_parsers]]
-message = "^style"
-group = "Styling"
-
-[[git.commit_parsers]]
-message = "^chore"
-group = "Miscellaneous"
+message = ".*"
+group = "<!-- 3 -->Misc"

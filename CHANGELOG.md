@@ -1,45 +1,22 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
-Generated from the conventional commits by [git-cliff](https://git-cliff.org).
+All notable changes to this project are documented in this file. Entries are
+generated from the conventional commits by [git-cliff](https://git-cliff.org),
+except where writing one by hand said more.
 
-## [0.1.0] - 2026-07-31
+## [0.1.0] - 2026-08-01
 
-### Bug Fixes
+First release.
 
-- Apply result to all tabs awaiting same cwd
-- Close six review findings on the discovery query
-- Resolve symlinked cwds via root aliases + review nits
-- Don't name nested repos after an ancestor root; bound caches
-- Request ReadCliPipes to cover pipe unblocking (#5)
+Names each Zellij tab after the git repository, or the folder, its panes are in,
+and keeps that name current as you `cd` around.
 
-### Build & CI
-
-- Release tooling — CI, release workflow, changelog and README fixes (#6)
-- Configure Renovate (#7)
-- Drop Renovate lock file maintenance (#9)
-
-### Documentation
-
-- Add README, LICENSE, and package metadata for publishing
-- Add ROADMAP
-
-### Features
-
-- Initial tab-cwd-rename plugin for Zellij 0.44
-- Use git repo name for tabs
-- Rename new tabs from active tab CWD
-- Add git_detection config option
-- Add pane count display
-- Add pipe API for tab prefix/suffix decorations (#1)
-- Name tabs at session start, new tab and restore
-
-### Performance
-
-- Deduplicate in-flight git rev-parse queries
-
-### Refactor
-
-- Split pure core from zellij adapter via effects
-- Align code with CONTEXT.md glossary
-
+- Tabs are named at session start, on new tabs and on layout restore, not only
+  after a `cd`.
+- Git repository name, else folder name, else `~` for `$HOME`.
+- `git_detection` can be turned off to always use the folder name and skip
+  running `git` altogether.
+- Optional pane-count suffix, off by default.
+- Decoration pipe API (`set_prefix`, `set_suffix`, `clear_prefix`,
+  `clear_suffix`, `clear_all`) so another plugin can wrap a symbol around the
+  name without fighting for `TabInfo.name`. Decorations survive a `cd`.
