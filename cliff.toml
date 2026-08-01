@@ -2,8 +2,9 @@
 header = """
 # Changelog
 
-All notable changes to this project are documented in this file.
-Generated from the conventional commits by [git-cliff](https://git-cliff.org).\n
+All notable changes to this project are documented in this file. Entries are
+generated from the conventional commits by [git-cliff](https://git-cliff.org),
+except where writing one by hand said more.\n
 """
 
 body = """

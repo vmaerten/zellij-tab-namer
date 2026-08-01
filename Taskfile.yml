@@ -45,16 +45,22 @@ tasks:
       - 'echo "bumped -> {{.NEW}}"'
 
   changelog:
-    desc: 'Regenerate CHANGELOG.md for a version. Prompts for NEW if omitted. Usage: task changelog [NEW=0.2.0]'
+    desc: 'Prepend a version section to CHANGELOG.md. Prompts for NEW if omitted. Usage: task changelog [NEW=0.2.0]'
     requires:
       vars:
         - name: NEW
     preconditions:
       - sh: 'command -v mise >/dev/null'
-        msg: "mise is required (https://mise.jdx.dev) — it pins git-cliff for this repo; then run 'mise install'."
+        msg: "mise is required (https://mise.jdx.dev), it pins git-cliff for this repo; then run 'mise install'."
+      # Prepending is not idempotent, unlike the full rewrite it replaced.
+      - sh: '! grep -q "^## \[{{.NEW}}\]" CHANGELOG.md'
+        msg: 'CHANGELOG.md already has a {{.NEW}} section; prepending would duplicate it.'
     cmds:
-      - mise exec -- git-cliff --tag v{{.NEW}} -o CHANGELOG.md
-      - 'echo "CHANGELOG.md regenerated for v{{.NEW}}"'
+      # --unreleased --prepend, not a full rewrite: past sections stay untouched,
+      # including the ones written by hand. git-cliff reuses the existing header
+      # rather than emitting a second one, as long as it matches cliff.toml.
+      - mise exec -- git-cliff --unreleased --tag v{{.NEW}} --prepend CHANGELOG.md
+      - 'echo "CHANGELOG.md now has a v{{.NEW}} section"'
 
   release-notes:
     desc: 'Preview the GitHub Release body. Usage: task release-notes [TAG=v0.2.0]'
