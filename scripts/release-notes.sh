@@ -29,7 +29,7 @@ awk -v ver="$ver" '
 ' "$root/CHANGELOG.md" >"$changes"
 
 if [ -z "$(tr -d '[:space:]' <"$changes")" ]; then
-  echo "$0: CHANGELOG.md has no section for $ver — run 'task changelog NEW=$ver'" >&2
+  echo "$0: CHANGELOG.md has no section for $ver, run 'task changelog NEW=$ver'" >&2
   exit 1
 fi
 

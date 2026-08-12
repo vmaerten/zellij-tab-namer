@@ -1,6 +1,6 @@
 # Shared opening for the README tapes: settings, then a session started and
 # granted off-camera. Sourced by demo.tape and demo-pipe.tape, which stay in Hide
-# when it returns — each one sets its own scene before calling Show.
+# when it returns: each one sets its own scene before calling Show.
 
 Set Shell bash
 Set FontFamily "JetBrainsMono Nerd Font"
@@ -17,7 +17,7 @@ Hide
 Type "docs/media/demo/run.sh" Enter
 
 # Grant the plugin's permissions. The throwaway $HOME means zellij's permission
-# cache is always empty, so the grant prompt always comes up — but it renders
+# cache is always empty, so the grant prompt always comes up, but it renders
 # nothing on screen, so there is no way to wait for it and no way to tell how
 # long the session takes to get there on this machine. Hence several `y`: the one
 # that falls inside the window grants, the others land in the shell and are wiped

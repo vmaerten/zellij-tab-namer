@@ -3,7 +3,7 @@
 #
 # Same staged session as demo.tape (docs/media/demo/boot.tape opens it); this one
 # only shows the pipe API: a prefix put around the name the plugin computed, and
-# what happens to it on a cd and on a split. Same caveat as demo.tape — takes fail
+# what happens to it on a cd and on a split. Same caveat as demo.tape: takes fail
 # often, so record through record.sh, which retries and protects the old GIF.
 
 Output docs/media/demo-pipe.gif

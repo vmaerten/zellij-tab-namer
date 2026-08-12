@@ -1,7 +1,7 @@
 # README demo, the naming half. Regenerate with:  docs/media/demo/record.sh
 # Needs the wasm built first:                      task wasm
 #
-# The session runs in a throwaway $HOME seeded by docs/media/demo/run.sh — which
+# The session runs in a throwaway $HOME seeded by docs/media/demo/run.sh, which
 # clones this repo into it, so the tree and the prompt are real. Only the
 # keystrokes are scripted.
 #
@@ -30,7 +30,7 @@ Sleep 1200ms
 
 Type "cd src" Enter
 Sleep 2s
-Type@25ms "# …and it did not move — the repo wins" Enter
+Type@25ms "# …and it did not move, the repo wins" Enter
 Sleep 2500ms
 
 Type "cd ~/Downloads" Enter

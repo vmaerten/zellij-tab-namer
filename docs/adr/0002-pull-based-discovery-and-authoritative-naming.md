@@ -5,5 +5,5 @@
 ## Consequences
 
 - The plugin is authoritative: every tab is renamed at first discovery, including restored tabs and manually renamed ones. Persistent per-tab customisation belongs to the Pipe API, not manual renames. The "only rename default-named tabs" alternative was rejected: stale saved names (ghost decorations, obsolete pane counts) would survive restores, and default-name detection is fragile.
-- The former "inherit the previous tab's cwd" heuristic is deleted — don't reintroduce it. The query returns the pane's actual cwd; a guess can only agree with it or be wrong.
+- The former "inherit the previous tab's cwd" heuristic is deleted: don't reintroduce it. The query returns the pane's actual cwd; a guess can only agree with it or be wrong.
 - A failed query (pane exited, cwd inaccessible) is silent; the first `CwdChanged` takes over.

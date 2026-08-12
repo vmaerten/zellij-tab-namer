@@ -1,6 +1,6 @@
 # zellij-tab-namer
 
-A zellij plugin that names tabs after the git repository — or, failing that, the directory — of their panes' current working directory, with optional per-tab decorations driven over zellij's pipe mechanism.
+A zellij plugin that names tabs after the git repository (or, failing that, the directory) of their panes' current working directory, with optional per-tab decorations driven over zellij's pipe mechanism.
 
 ## Language
 
@@ -35,7 +35,7 @@ _Avoid_: toplevel, repo root
 A tab awaiting the git verdict for a cwd whose query is in flight. Every waiter on the same cwd is renamed when the verdict lands.
 
 **Discovery query**:
-The cwd lookup issued for a newly discovered pane whose tab has no base name yet — how tabs get named at session start, tab creation and restore, without waiting for a `cd`. The focused pane of the tab's visible layer speaks for it, with fallbacks to another pane of that layer, then any focused pane, then any terminal pane.
+The cwd lookup issued for a newly discovered pane whose tab has no base name yet: how tabs get named at session start, tab creation and restore, without waiting for a `cd`. The focused pane of the tab's visible layer speaks for it, with fallbacks to another pane of that layer, then any focused pane, then any terminal pane.
 _Avoid_: poll, probe
 
 ### Architecture

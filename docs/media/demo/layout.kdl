@@ -1,5 +1,5 @@
 // Four tabs, four places: the home directory, a checkout of this repo, a plain
-// folder, and a pane deep inside another repo — `code/dotfiles/nvim`, which
+// folder, and a pane deep inside another repo: `code/dotfiles/nvim`, which
 // should still read `dotfiles`, the repo winning over the folder before anything
 // is typed. Deliberately unnamed: the plugin is what names them, so a `name=`
 // here would be the layout stealing the demo. `zellij:tab-bar` is the built-in,
