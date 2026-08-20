@@ -9,5 +9,5 @@ The list is nominative, so a host function added in a later `zellij-tile` is not
 ## Consequences
 
 - `.cargo/config.toml` no longer forces `wasm32-wasip1`: native is the default so bare `cargo test`/`cargo check`/IDE tooling work; the plugin is built with the `cargo wasm` alias. Don't "fix" this back.
-- Native builds need the empty `#[cfg(not(target_arch = "wasm32"))] fn main()` — the real entrypoint comes from `register_plugin!` on wasm.
+- Native builds need the empty `#[cfg(not(target_arch = "wasm32"))] fn main()`: the real entrypoint comes from `register_plugin!` on wasm.
 - The `Effect::RunGit` variant carries the correlation `context` so the round-trip protocol (build on send, parse on `RunCommandResult`) stays entirely core-side; the adapter only knows the constant command line.
