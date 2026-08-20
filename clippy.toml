@@ -1,5 +1,5 @@
 # The core/adapter seam, see docs/adr/0001-effects-seam-with-wasm-gated-adapter.md.
-# Until zellij-tile 0.45 the linker enforced it: the host symbols did not exist on
+# Until zellij-tile 0.44 the linker enforced it: the host symbols did not exist on
 # native, so a host call in the core failed to link. 0.45 stubs them out on native,
 # so this lint takes over. `drive()` carries the matching allow, and is the only
 # place that may hold one.
