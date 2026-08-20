@@ -115,8 +115,8 @@ struct State {
 register_plugin!(State);
 
 // ─── Adapter: the only place plugin behaviour touches the zellij host ───────
-// wasm-only: the host functions are extern symbols that don't exist on native,
-// so the linker itself guarantees the core below stays free of host calls.
+// The host functions are gated to wasm, and clippy.toml disallows them
+// everywhere but `drive()`, which carries the only allow in this file.
 
 #[cfg(target_arch = "wasm32")]
 impl ZellijPlugin for State {
@@ -146,6 +146,7 @@ impl State {
     /// Execute effects against the host. Discovery-query answers are fed back
     /// into the core as synthetic CwdChanged events; the loop is bounded
     /// because responses never emit further queries.
+    #[allow(clippy::disallowed_methods)] // the seam: host calls live here, nowhere else
     fn drive(&mut self, mut effects: Vec<Effect>) {
         while !effects.is_empty() {
             let mut reinjected = Vec::new();

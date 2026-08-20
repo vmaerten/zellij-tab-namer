@@ -143,9 +143,9 @@ task ci       # what CI runs: fmt, clippy, test, wasm build (needs go-task)
 ```
 
 The plugin is a pure core that turns Zellij events into a `Vec<Effect>`, plus a thin wasm-gated
-adapter that runs those effects against the host. Since the host functions only exist on wasm, the
-linker enforces the split, which is what makes the timing-sensitive naming logic testable with a
-plain `cargo test` rather than in a live session. See
+adapter that runs those effects against the host. `clippy.toml` keeps the split honest by
+disallowing the host functions outside that adapter, which is what makes the timing-sensitive
+naming logic testable with a plain `cargo test` rather than in a live session. See
 [ADR-0001](docs/adr/0001-effects-seam-with-wasm-gated-adapter.md).
 
 - [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,

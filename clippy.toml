@@ -1,0 +1,13 @@
+# The core/adapter seam, see docs/adr/0001-effects-seam-with-wasm-gated-adapter.md.
+# Until zellij-tile 0.45 the linker enforced it: the host symbols did not exist on
+# native, so a host call in the core failed to link. 0.45 stubs them out on native,
+# so this lint takes over. `drive()` carries the matching allow, and is the only
+# place that may hold one.
+disallowed-methods = [
+  { path = "zellij_tile::shim::request_permission", reason = "host call: adapter only" },
+  { path = "zellij_tile::shim::subscribe", reason = "host call: adapter only" },
+  { path = "zellij_tile::shim::rename_tab_with_id", reason = "host call: adapter only" },
+  { path = "zellij_tile::shim::run_command_with_env_variables_and_cwd", reason = "host call: adapter only" },
+  { path = "zellij_tile::shim::get_pane_cwd", reason = "host call: adapter only" },
+  { path = "zellij_tile::shim::unblock_cli_pipe_input", reason = "host call: adapter only" },
+]
