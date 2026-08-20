@@ -13,7 +13,7 @@
   labels: ['dependencies'],
   prConcurrentLimit: 3,
 
-  // `zellij-tile = "0.44"` means patch releases only move Cargo.lock — and the
+  // `zellij-tile = "0.45"` means patch releases only move Cargo.lock, and the
   // release notes read the advertised Zellij floor from that lock.
   rangeStrategy: 'update-lockfile',
 

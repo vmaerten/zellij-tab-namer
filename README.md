@@ -37,7 +37,7 @@ AI coding agent is up to, as `⚡ myrepo`.
 
 ## Requirements
 
-- Zellij 0.44.3 or later (`zellij --version`).
+- Zellij 0.45.0 or later (`zellij --version`).
 - `git` on your `PATH`, only if you want repository names. Without it, tabs stay on folder names,
   and `git_detection false` skips git entirely.
 
