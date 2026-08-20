@@ -79,10 +79,10 @@ tasks:
       - sh: 'echo "{{.NEW}}" | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+$"'
         msg: 'NEW must be semver X.Y.Z (got "{{.NEW}}")'
       - sh: 'test -z "$(git status --porcelain)"'
-        msg: 'Working tree is dirty — commit or stash first.'
+        msg: 'Working tree is dirty, commit or stash first.'
       - sh: '! git rev-parse -q --verify "refs/tags/v{{.NEW}}" >/dev/null'
         msg: 'Tag v{{.NEW}} already exists.'
-    prompt: 'Release v{{.NEW}} — bump, run CI, commit, tag and push to origin?'
+    prompt: 'Release v{{.NEW}}: bump, run CI, commit, tag and push to origin?'
     cmds:
       - task: bump
         vars: { NEW: '{{.NEW}}' }
@@ -96,4 +96,4 @@ tasks:
       - git tag v{{.NEW}}
       - git push origin HEAD
       - git push origin v{{.NEW}}
-      - 'echo "released v{{.NEW}} — Release workflow will build & publish the wasm."'
+      - 'echo "released v{{.NEW}}. The Release workflow will build & publish the wasm."'

@@ -37,7 +37,7 @@ AI coding agent is up to, as `⚡ myrepo`.
 
 ## Requirements
 
-- Zellij 0.45.0 or later (`zellij --version`).
+- Zellij 0.44.3 or later (`zellij --version`).
 - `git` on your `PATH`, only if you want repository names. Without it, tabs stay on folder names,
   and `git_detection false` skips git entirely.
 
@@ -50,7 +50,7 @@ curl -L -o ~/.config/zellij/plugins/zellij-tab-namer.wasm \
 ```
 
 > Rather build it yourself? `cargo wasm` produces the same file, see
-> [Development](#development). Drop it into `~/.config/zellij/plugins/`.
+> [`CONTRIBUTING.md`](CONTRIBUTING.md). Drop it into `~/.config/zellij/plugins/`.
 
 Load it in `~/.config/zellij/config.kdl`:
 
@@ -134,23 +134,12 @@ One limitation is deliberate: running `git init` in a folder the session has alr
 unnoticed until the session restarts, because the "not a repo" verdict is cached and never
 invalidated. The ADRs cover why.
 
-## Development
+## Docs
 
-```sh
-cargo test    # the pure core, no zellij needed
-cargo wasm    # release build -> target/wasm32-wasip1/release/zellij-tab-namer.wasm
-task ci       # what CI runs: fmt, clippy, test, wasm build (needs go-task)
-```
-
-The plugin is a pure core that turns Zellij events into a `Vec<Effect>`, plus a thin wasm-gated
-adapter that runs those effects against the host. `clippy.toml` keeps the split honest by
-disallowing the host functions outside that adapter, which is what makes the timing-sensitive
-naming logic testable with a plain `cargo test` rather than in a live session. See
-[ADR-0001](docs/adr/0001-effects-seam-with-wasm-gated-adapter.md).
-
-- [`docs/CONTEXT.md`](docs/CONTEXT.md) covers the vocabulary: base name against rendered name,
-  decoration, waiter, discovery query.
-- [`docs/adr/`](docs/adr) holds the architecture decision records.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md), build, tests, recording the demo GIFs, release conventions.
+- [`docs/CONTEXT.md`](docs/CONTEXT.md), the vocabulary: base name against rendered name, decoration,
+  waiter, discovery query.
+- [`docs/adr/`](docs/adr), the architecture decision records.
 
 ## License
 

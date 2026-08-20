@@ -1,4 +1,4 @@
-# Dev tooling pinned for this repo — https://mise.jdx.dev
+# Dev tooling pinned for this repo, see https://mise.jdx.dev
 # Bootstrap with `mise install`.
 #
 # git-cliff generates CHANGELOG.md from the conventional commits (see cliff.toml).

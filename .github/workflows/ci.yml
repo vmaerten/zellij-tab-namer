@@ -10,7 +10,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# rustflags: "" — the action defaults to a global -D warnings that would apply
+# rustflags: "" is set because the action defaults to a global -D warnings that would apply
 # to dependencies too; the clippy job already gates our own code.
 
 jobs:

@@ -1,5 +1,5 @@
 // Zellij config for the README demo. @WASM@ and @HERE@ are substituted by run.sh.
-// git_detection stays on its default (true) — naming after the repo is the point.
+// git_detection stays on its default (true): naming after the repo is the point.
 
 layout_dir "@HERE@"
 default_shell "bash"

@@ -10,7 +10,7 @@ const CTX_CWD: &str = "cwd";
 
 /// Upper bound on the total entries across the never-invalidated git caches
 /// (`git_roots` / `not_git` / `root_aliases` / `resolved_cwds`). Crossing it
-/// clears them — a cleared entry just costs one cheap async re-query. Keeps
+/// clears them: a cleared entry just costs one cheap async re-query. Keeps
 /// memory bounded without a timer, matching the plugin's event-driven model.
 const MAX_GIT_CACHE_ENTRIES: usize = 4096;
 
@@ -25,7 +25,7 @@ enum Effect {
         name: String,
     },
     /// Launch `git rev-parse --show-toplevel` in `cwd`. The context is echoed
-    /// back by zellij in RunCommandResult — the correlation protocol (build
+    /// back by zellij in RunCommandResult: the correlation protocol (build
     /// and parse) lives entirely in the core.
     RunGit {
         cwd: PathBuf,
@@ -53,7 +53,7 @@ struct State {
     got_permissions: bool,
     /// Latest state snapshots seen before permissions were granted, replayed on
     /// grant. TabUpdate/PaneUpdate are full snapshots, so only the last of each
-    /// kind matters — this keeps pre-grant buffering bounded.
+    /// kind matters: this keeps pre-grant buffering bounded.
     buffered_tabs: Option<Vec<TabInfo>>,
     buffered_panes: Option<PaneManifest>,
     buffered_cwds: Vec<(u32, PathBuf)>,
@@ -92,7 +92,7 @@ struct State {
     /// the ancestor would name it wrongly (and permanently). Never invalidated,
     /// like not_git.
     resolved_cwds: HashSet<String>,
-    /// CwdChanged events for pane_ids not yet in pane_to_tab — latest event per
+    /// CwdChanged events for pane_ids not yet in pane_to_tab: latest event per
     /// pane, kept in arrival order so replay stays deterministic
     pending_cwds: Vec<(u32, PathBuf)>,
     /// Last known CWD per tab_id
@@ -184,7 +184,7 @@ impl State {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {}
 
-// ─── Core: pure state machine — events in, effects out ──────────────────────
+// ─── Core: pure state machine, events in, effects out ───────────────────────
 
 impl State {
     fn init(&mut self, config: BTreeMap<String, String>, home_dir: String) -> Vec<Effect> {
@@ -409,7 +409,7 @@ impl State {
 
     /// Pick the pane whose cwd names the tab: the focused pane of the visible
     /// layer (is_focused is per-layer), then any candidate of the visible
-    /// layer, then any focused pane, then any candidate — what the user sees
+    /// layer, then any focused pane, then any candidate: what the user sees
     /// beats a focus hidden in the other layer.
     fn choose_discovery_pane(&self, tab_id: usize, panes: &[PaneInfo]) -> Option<u32> {
         let want_floating = self.floating_visible.contains(&tab_id);
@@ -491,7 +491,7 @@ impl State {
         true
     }
 
-    /// Whether `find_git_root`'s ancestor walk can be trusted for this cwd — i.e.
+    /// Whether `find_git_root`'s ancestor walk can be trusted for this cwd, i.e.
     /// it won't miss a nested repo. True only for an exact hit (the cwd is itself
     /// a known root or alias) or a cwd git has already resolved: for anything
     /// else a `git rev-parse` must run, in case the cwd's real toplevel is a repo
@@ -1089,7 +1089,7 @@ mod tests {
         // next manifest doesn't contain pane 99: the buffered cwd is dropped
         state.handle(Event::PaneUpdate(manifest(&[(0, &[10])])));
         // when pane 99 later appears in a new tab, the ghost cwd must not name
-        // it — only a fresh discovery query is emitted
+        // it: only a fresh discovery query is emitted
         state.handle(Event::TabUpdate(vec![tab(1, 0, true), tab(2, 1, false)]));
         let effects = state.handle(Event::PaneUpdate(manifest(&[(0, &[10]), (1, &[99])])));
         assert_eq!(effects, vec![Effect::QueryPaneCwd { pane_id: 99 }]);
@@ -1211,7 +1211,7 @@ mod tests {
         state.handle(Event::TabUpdate(vec![floating_tab]));
 
         // the tiled pane is focused in its (hidden) layer; the visible
-        // floating pane is not focused — what the user sees must win
+        // floating pane is not focused: what the user sees must win
         let panes = vec![
             PaneInfo {
                 id: 10,
