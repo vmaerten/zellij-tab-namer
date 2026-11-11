@@ -1,6 +1,6 @@
 [package]
 name = "zellij-tab-namer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 description = "A Zellij plugin that names tabs after the git repo or folder their panes are in, with a decoration pipe API."

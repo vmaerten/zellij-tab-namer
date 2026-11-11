@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. Entries are
 generated from the conventional commits by [git-cliff](https://git-cliff.org),
 except where writing one by hand said more.
 
+## [0.2.0] - 2026-11-11
+
+### Features
+
+- Build against zellij-tile 0.45 (#23)
+- Enforce the core/adapter seam with a lint (#24)
+
+### Misc
+
+- Add the demo GIF to the README (#21)
+- Replace every em dash across the repo (#22)
 ## [0.1.0] - 2026-08-01
 
 First release.
