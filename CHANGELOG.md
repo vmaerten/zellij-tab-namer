@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. Entries are
 generated from the conventional commits by [git-cliff](https://git-cliff.org),
 except where writing one by hand said more.
 
+## [0.3.0] - 2026-11-12
+
+### Features
+
+- Build against zellij-tile 0.46 (#29)
+
 ## [0.2.0] - 2026-11-11
 
 ### Features
