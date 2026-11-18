@@ -4,4 +4,4 @@
 # git-cliff generates CHANGELOG.md from the conventional commits (see cliff.toml).
 # Pinning it keeps the generated changelog identical whoever runs `task changelog`.
 [tools]
-git-cliff = "2.13.1"
+git-cliff = "2.14.2"
