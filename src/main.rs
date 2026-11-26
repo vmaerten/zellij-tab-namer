@@ -15,7 +15,7 @@ const CTX_CWD: &str = "cwd";
 const MAX_GIT_CACHE_ENTRIES: usize = 4096;
 
 /// Everything the plugin can do to the world. The core only emits these;
-/// `drive` in the ZellijPlugin adapter is the sole place they are executed.
+/// `drive` in the ZellijSharedPlugin adapter is the sole place they are executed.
 #[derive(Debug, Clone, PartialEq)]
 enum Effect {
     RequestPermissions(Vec<PermissionType>),
@@ -111,34 +111,35 @@ struct State {
     home_dir: String,
 }
 
+// Shared, not per-client: zellij runs one instance of a regular plugin per
+// client and destroys it on detach, so a session switch would drop every
+// decoration. See docs/adr/0003-one-shared-instance-per-session.md.
 #[cfg(target_arch = "wasm32")]
-register_plugin!(State);
+register_shared_plugin!(State);
 
 // ─── Adapter: the only place plugin behaviour touches the zellij host ───────
 // The host functions are gated to wasm, and clippy.toml disallows them
 // everywhere but `drive()`, which carries the only allow in this file.
 
 #[cfg(target_arch = "wasm32")]
-impl ZellijPlugin for State {
+impl ZellijSharedPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
         let home_dir = std::env::var("HOME").unwrap_or_default();
         let effects = self.init(config, home_dir);
         self.drive(effects);
     }
 
-    fn update(&mut self, event: Event) -> bool {
+    fn update(&mut self, event: Event, _context: EventContext) -> RenderResponse {
         let effects = self.handle(event);
         self.drive(effects);
-        false
+        RenderResponse::Nothing
     }
 
-    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+    fn pipe(&mut self, pipe_message: PipeMessage, _context: EventContext) -> RenderResponse {
         let effects = self.handle_pipe(pipe_message);
         self.drive(effects);
-        false
+        RenderResponse::Nothing
     }
-
-    fn render(&mut self, _rows: usize, _cols: usize) {}
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -179,7 +180,7 @@ impl State {
     }
 }
 
-/// The real entrypoint comes from register_plugin! on wasm; this keeps
+/// The real entrypoint comes from register_shared_plugin! on wasm; this keeps
 /// native builds (cargo test / check) linkable.
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {}
